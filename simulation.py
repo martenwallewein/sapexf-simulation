@@ -21,7 +21,7 @@ class Simulation:
         print("Starting beaconing process...")
         self.topology.initiate_beaconing(self.path_selection_algorithm)
         # Give beaconing some time to propagate
-        yield self.env.timeout(5000) 
+        yield self.env.timeout(2000) 
         
         print("\nAll available paths discovered:")
         for (src, dst), paths in self.path_selection_algorithm.path_store.items():
@@ -50,7 +50,7 @@ class Simulation:
                 print(f"Warning: Could not find source or destination host for flow {flow['name']}")
 
         # Run the simulation for a specified duration
-        simulation_duration = self.traffic_scenario.get("duration_ms", 20000)
+        simulation_duration = self.traffic_scenario.get("duration_ms", 1000)
         print(f"\nRunning simulation for {simulation_duration}ms...")
         self.env.run(until=simulation_duration)
         print("\nSimulation finished.")

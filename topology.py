@@ -66,9 +66,30 @@ class Topology:
         return self.nodes.get(node_id)
 
     def initiate_beaconing(self, path_selection_algorithm):
+        """Start beaconing processes from core ASes and set up path registration for all routers"""
+        beaconing_processes = {}
+
+        # Create beaconing processes for core ASes
         for isd_as in self.core_ases:
             # Start beaconing from the first border router of the core AS
             router_id = list(self.graph.neighbors(next(h for h in self.hosts if h.startswith(isd_as))))[0]
             start_router = self.get_node(router_id)
-            beaconing_process = BeaconingProcess(self.env, start_router, path_selection_algorithm)
+
+            beaconing_process = BeaconingProcess(
+                self.env,
+                start_router,
+                path_selection_algorithm,
+                interval=1000,
+                topology=self
+            )
+            beaconing_processes[isd_as] = beaconing_process
             self.env.process(beaconing_process.start())
+
+        # Set beaconing process reference on all routers for path registration
+        # All routers need access to a beaconing process to register discovered paths
+        # For simplicity, we'll use the first core AS's beaconing process for all routers
+        if beaconing_processes:
+            primary_beaconing_process = list(beaconing_processes.values())[0]
+            for node_id, node in self.nodes.items():
+                if hasattr(node, 'set_beaconing_process'):
+                    node.set_beaconing_process(primary_beaconing_process)

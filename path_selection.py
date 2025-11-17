@@ -12,8 +12,20 @@ class PathSelectionAlgorithm(ABC):
         """Selects and returns the best path."""
         pass
 
-    def discover_paths(self):
-        """A simplified discovery process that finds all simple paths."""
+    def discover_paths(self, use_graph_traversal=False):
+        """
+        Optional discovery process that finds all simple paths using graph traversal.
+        This is a fallback mechanism - normally paths should be populated by beaconing.
+
+        Args:
+            use_graph_traversal: If True, use NetworkX to find all paths (bypasses beaconing)
+        """
+        if not use_graph_traversal:
+            print("Path discovery via beaconing is enabled. Paths will be discovered through beacon propagation.")
+            return
+
+        # Fallback: graph-based path discovery (for testing/debugging)
+        print("WARNING: Using graph traversal for path discovery. This bypasses SCION beaconing.")
         all_ases = {node.split('-')[0] for node in self.topology.graph.nodes() if '-' in node}
         for src_as in all_ases:
             for dst_as in all_ases:
@@ -23,7 +35,7 @@ class PathSelectionAlgorithm(ABC):
                     dst_routers = [r for r in self.topology.graph.nodes() if r.startswith(dst_as + '-')]
                     if not src_routers or not dst_routers:
                         continue
-                    
+
                     # Find all paths between the first router of each AS
                     # In a real scenario, you'd do this for all border routers
                     paths = list(nx.all_simple_paths(self.topology.graph, source=src_routers[0], target=dst_routers[0]))
@@ -32,10 +44,11 @@ class PathSelectionAlgorithm(ABC):
 
 # --- Example Implementation ---
 class ShortestPathAlgorithm(PathSelectionAlgorithm):
-    def __init__(self, topology):
+    def __init__(self, topology, use_beaconing=True):
         super().__init__(topology)
-        # In this simple model, we discover all paths at the beginning
-        self.discover_paths()
+        self.use_beaconing = use_beaconing
+        # Only use graph traversal if beaconing is disabled
+        self.discover_paths(use_graph_traversal=not use_beaconing)
 
     def select_path(self, source_as, destination_as):
         available_paths = self.path_store.get((source_as, destination_as), [])

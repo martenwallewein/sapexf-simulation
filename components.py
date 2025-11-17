@@ -49,17 +49,75 @@ class Router(Node):
     def __init__(self, env, node_id):
         super().__init__(env, node_id)
         self.forwarding_table = {} # simple next-hop forwarding
+        self.beaconing_process = None  # Will be set by topology when beaconing is initiated
+        self.as_id = self.extract_as_from_router_id(node_id)
+
+    def extract_as_from_router_id(self, router_id):
+        """Extract AS ID from router ID. E.g., '1-ff00:0:110-br1-110-1' -> '1-ff00:0:110'"""
+        # Format: ISD-ASff00:AS_ID-router_name
+        # Example: "1-ff00:0:110-br1-110-1" -> "1-ff00:0:110"
+        # The AS part is everything before the last occurrence of a router name pattern
+        # We can identify AS by looking for the pattern before "-br"
+        if '-br' in router_id:
+            as_id = router_id.split('-br')[0]
+            return as_id
+        return router_id
+
+    def set_beaconing_process(self, beaconing_process):
+        """Set the beaconing process for path registration"""
+        self.beaconing_process = beaconing_process
 
     def receive_packet(self, packet):
         # Beacon packets are handled by the beaconing process logic
         if packet.is_beacon:
-            # Propagate beacon
+            # Get AS-level path to check for loops
+            as_path = packet.get_as_path()
+            current_as = self.as_id
+
+            # AS-level loop detection
+            if current_as in as_path:
+                # Already visited this AS, drop the beacon
+                return
+
+            # Add hop information to the beacon
+            # Find which neighbor this beacon came from to determine ingress interface
+            ingress_if = None
+            if len(packet.path) > 0:
+                previous_router = packet.path[-1]
+                ingress_if = previous_router  # Simplified: use router ID as interface ID
+
+            # Get link metrics for this hop
+            link_metrics = {}
+            if ingress_if and ingress_if in self.ports:
+                link = self.ports[ingress_if]
+                link_metrics = {
+                    'latency': link.latency,
+                    'bandwidth': link.bandwidth
+                }
+
+            # Add this hop to the beacon's AS-level path
+            packet.add_hop(
+                as_id=current_as,
+                router_id=self.node_id,
+                ingress_if=ingress_if,
+                link_metrics=link_metrics
+            )
+
+            # Update router-level path (for backward compatibility)
             packet.path.append(self.node_id)
-            # Simple flooding for beaconing
+
+            # Register this path if we have a beaconing process
+            if self.beaconing_process:
+                self.beaconing_process.register_path(packet, self.node_id)
+
+            # Forward beacon to neighbors (not in AS path)
             for neighbor_id, link in self.ports.items():
-                # Avoid loops
+                # Avoid router-level loops (additional safety check)
                 if neighbor_id not in packet.path:
-                    link.enqueue(packet.clone())
+                    # Clone beacon and forward
+                    beacon_copy = packet.clone()
+                    link.enqueue(beacon_copy)
+
         else: # Data packet
             if packet.destination == self.node_id:
                 # Packet for a host in this AS, find the host link
