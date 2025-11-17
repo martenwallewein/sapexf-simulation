@@ -1,0 +1,68 @@
+{
+    "1-ff00:0:110": {
+        "core": true,
+        "border_routers": {
+            "br1-110-1": {
+                "interfaces": [
+                    {
+                        "isd_as": "1-ff00:0:111",
+                        "neighbor_router": "br1-111-1",
+                        "latency_ms": 10,
+                        "bandwidth_mbps": 100
+                    },
+                    {
+                        "isd_as": "1-ff00:0:112",
+                        "neighbor_router": "br1-112-1",
+                        "latency_ms": 20,
+                        "bandwidth_mbps": 50
+                    }
+                ]
+            }
+        },
+        "hosts": {
+            "server1": {
+                "addr": "192.168.0.1"
+            }
+        }
+    },
+    "1-ff00:0:111": {
+        "core": false,
+        "border_routers": {
+            "br1-111-1": {
+                "interfaces": [
+                    {
+                        "isd_as": "1-ff00:0:110",
+                        "neighbor_router": "br1-110-1",
+                        "latency_ms": 10,
+                        "bandwidth_mbps": 100
+                    }
+                ]
+            }
+        },
+        "hosts": {
+            "client1": {
+                "addr": "10.0.0.5"
+            }
+        }
+    },
+    "1-ff00:0:112": {
+        "core": false,
+        "border_routers": {
+            "br1-112-1": {
+                "interfaces": [
+                    {
+                        "isd_as": "1-ff00:0:110",
+                        "neighbor_router": "br1-110-1",
+                        "latency_ms": 20,
+                        "bandwidth_mbps": 50
+                    }
+                ]
+            }
+        },
+        "hosts": {
+            "client2": {
+                "addr": "172.16.5.5"
+            }
+        }
+    }
+}

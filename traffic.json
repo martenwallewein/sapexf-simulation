@@ -1,0 +1,12 @@
+{
+    "duration_ms": 10000,
+    "flows": [
+        {
+            "name": "WebServerTraffic",
+            "source": "1-ff00:0:111,10.0.0.5",
+            "destination": "1-ff00:0:112,172.16.5.5",
+            "start_time_ms": 1000,
+            "data_size_kb": 5000
+        }
+    ]
+}
