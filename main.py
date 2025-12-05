@@ -1,7 +1,7 @@
 # main.py
 import argparse
 from simulation import Simulation
-from path_selection import ShortestPathAlgorithm
+from path_selection import SapexAlgorithm
 # To use your own algorithm, you would import it here, e.g.:
 # from my_sapex_f import SapexAlgorithm
 
@@ -23,7 +23,7 @@ def main():
 
     # --- To use a different algorithm, change this line ---
     # For example: sim = Simulation(args.topology, args.traffic, SapexAlgorithm)
-    sim = Simulation(args.topology, args.traffic, ShortestPathAlgorithm)
+    sim = Simulation(args.topology, args.traffic, SapexAlgorithm)
     
     sim.env.process(sim.run())
     sim.env.run()
