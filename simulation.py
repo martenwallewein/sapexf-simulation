@@ -41,13 +41,32 @@ class Simulation:
         print("Starting beaconing process...")
         self.topology.initiate_beaconing(self.path_selection_algorithm)
         # Give beaconing some time to propagate
-        yield self.env.timeout(2000) 
-        
+        yield self.env.timeout(2000)
+
         print("\nAll available paths discovered:")
         for (src, dst), paths in self.path_selection_algorithm.path_store.items():
             print(f"  Paths from {src} to {dst}:")
             for i, path in enumerate(paths):
                  print(f"    {i+1}: {' -> '.join([str(hop) for hop in path])}")
+
+        # Enable probing if the algorithm supports it
+        if hasattr(self.path_selection_algorithm, 'enable_probing'):
+            # Collect one host per AS for probing
+            probe_hosts = {}
+            for node_id, node in self.topology.nodes.items():
+                if hasattr(node, 'isd_as'):  # It's a host
+                    as_id = node.isd_as
+                    if as_id not in probe_hosts:
+                        probe_hosts[as_id] = node
+                        node.path_selector = self.path_selection_algorithm
+
+            # Check if algorithm has probing_interval configured
+            if hasattr(self.path_selection_algorithm, 'probing_interval') and \
+               self.path_selection_algorithm.probing_interval:
+                interval = self.path_selection_algorithm.probing_interval
+                self.path_selection_algorithm.enable_probing(interval, self.env, probe_hosts)
+                self.env.process(self.path_selection_algorithm.probe_paths())
+                print(f"\nPath probing enabled with {interval}ms interval")
 
 
         print("\nStarting applications based on traffic scenario...")

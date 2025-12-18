@@ -8,6 +8,13 @@ class PathSelectionAlgorithm(ABC):
         self.topology = topology
         self.path_store = {} # (src_as, dst_as) -> [path1, path2, ...]
         self.unavailable_paths = {} # (src_as, dst_as) -> set(tuple(path))
+        self.probing_enabled = False
+        self.probing_interval = None  # Milliseconds between probes
+        self.probe_results = {}  # {tuple(path): [latency1, latency2, ...]}
+        self.pending_probes = {}  # {probe_id: (path, send_time)}
+        self.probe_counter = 0
+        self.env = None  # Will be set by simulation
+        self.probe_hosts = {}  # {as_id: host} for sending probes
 
     @abstractmethod
     def select_path(self, source_as, destination_as):
@@ -82,6 +89,123 @@ class PathSelectionAlgorithm(ABC):
             if path_tuple in unavail_set:
                 return False
         return True
+
+    def enable_probing(self, interval_ms, env, probe_hosts):
+        """
+        Enable periodic path probing.
+
+        Args:
+            interval_ms: Milliseconds between probe cycles
+            env: SimPy environment for scheduling
+            probe_hosts: Dictionary mapping AS IDs to host objects for sending probes
+        """
+        self.probing_enabled = True
+        self.probing_interval = interval_ms
+        self.env = env
+        self.probe_hosts = probe_hosts
+
+    def probe_paths(self):
+        """
+        SimPy process that periodically probes all known paths.
+        This should be called as: env.process(algorithm.probe_paths())
+        """
+        from packet import ProbePacket
+
+        if not self.probing_enabled:
+            return
+
+        while True:
+            # Wait for the next probing interval
+            yield self.env.timeout(self.probing_interval)
+
+            # Probe all paths in the path store
+            for (src_as, dst_as), paths in self.path_store.items():
+                # Check if we have a host in the source AS to send probes
+                if src_as not in self.probe_hosts:
+                    continue
+
+                source_host = self.probe_hosts[src_as]
+
+                for path in paths:
+                    # Skip unavailable paths
+                    if not self.is_path_available(path):
+                        continue
+
+                    # Create and send probe
+                    self.probe_counter += 1
+                    probe_id = f"probe_{self.probe_counter}"
+
+                    probe = ProbePacket(
+                        source=source_host.node_id,
+                        destination=path[-1],  # Last router in path
+                        path=path.copy(),
+                        probe_id=probe_id,
+                        timestamp=self.env.now
+                    )
+
+                    # Track pending probe
+                    self.pending_probes[probe_id] = (tuple(path), self.env.now)
+
+                    # Send probe
+                    source_host.send_packet(probe)
+
+            # Start listening for probe responses
+            self.env.process(self._collect_probe_responses())
+
+    def _collect_probe_responses(self):
+        """
+        Collect probe responses and update latency measurements.
+        """
+        # Wait a reasonable time for probes to return (e.g., 2x the max expected RTT)
+        max_wait = 500  # milliseconds
+        yield self.env.timeout(max_wait)
+
+        # Process any probes that should have returned by now
+        # In a real implementation, this would check the hosts' queues
+        # For now, we rely on the update_probe_result() being called
+
+    def update_probe_result(self, probe_id, rtt):
+        """
+        Update probe results when a probe returns.
+
+        Args:
+            probe_id: Identifier of the probe
+            rtt: Round-trip time in milliseconds
+        """
+        if probe_id not in self.pending_probes:
+            return
+
+        path_tuple, send_time = self.pending_probes[probe_id]
+
+        # Store probe result
+        if path_tuple not in self.probe_results:
+            self.probe_results[path_tuple] = []
+
+        self.probe_results[path_tuple].append(rtt)
+
+        # Keep only recent measurements (e.g., last 10)
+        if len(self.probe_results[path_tuple]) > 10:
+            self.probe_results[path_tuple].pop(0)
+
+        # Remove from pending
+        del self.pending_probes[probe_id]
+
+    def get_path_latency(self, router_path):
+        """
+        Get the average probed latency for a path.
+
+        Args:
+            router_path (list): Router sequence
+
+        Returns:
+            float: Average RTT in milliseconds, or None if no probe data
+        """
+        path_tuple = tuple(router_path)
+
+        if path_tuple not in self.probe_results or not self.probe_results[path_tuple]:
+            return None
+
+        return sum(self.probe_results[path_tuple]) / len(self.probe_results[path_tuple])
 
     def discover_paths(self, use_graph_traversal=False):
         """
@@ -165,7 +289,7 @@ class PathCandidate:
 
 class SapexAlgorithm(PathSelectionAlgorithm):
     # initialization method
-    def __init__(self, topology, use_beaconing=True):
+    def __init__(self, topology, use_beaconing=True, enable_probing=False, probing_interval=1000):
         super().__init__(topology)
         self.use_beaconing = use_beaconing
         self.discover_paths(use_graph_traversal=not use_beaconing)
@@ -184,51 +308,69 @@ class SapexAlgorithm(PathSelectionAlgorithm):
 
         # Initialize the partition size N for the application
         self.partition_size_N = 2
+
+        # Set probing interval if enabled
+        if enable_probing:
+            self.probing_interval = probing_interval
     
     #Step 1: Retrieve paths -- Beaconing integration needed
 
     def _sync_candidates(self, source_as, destination_as):
         """
-        Synchronizes the 'stateless' network paths discovered by beaconing with the 
+        Synchronizes the 'stateless' network paths discovered by beaconing with the
         'stateful' PathCandidate objects used by the algorithm.
-        
+
         This method acts as a bridge:
         1. It retrieves raw paths (lists of router IDs) from the network topology.
         2. It checks if the algorithm has seen these paths before.
-        3. It returns PathCandidate objects that preserve historical metrics (RTT, Loss) 
+        3. It returns PathCandidate objects that preserve historical metrics (RTT, Loss)
            across simulation steps.
         """
-        
-        # 1. Retrieve Raw Data: 
+
+        # 1. Retrieve Raw Data:
         # Fetch the latest list of available paths from the global path store.
         # These were simple lists of strings (e.g., ['router A', 'router B']).
         raw_paths = self.path_store.get((source_as, destination_as), [])
-        
-        # This list will hold the pathCandidate objects(extended versions of raw paths) 
+
+        # This list will hold the pathCandidate objects(extended versions of raw paths)
         # we pass to the algorithm
         current_candidates = []
-        
+
         for p in raw_paths:
             # 2. Data Transformation (List -> Tuple):
             # We convert the mutable list 'p' into an immutable 'tuple'.
             # This is required to use the path as a key in a Python dictionary.
-            p_key = tuple(p) 
-            
+            p_key = tuple(p)
+
             # 3. We check if we already have a PathCandidate object for this specific path.
             if p_key not in self.candidates_map:
                 # CASE: NEW PATH
-                # If this path was just discovered by a beacon, we initialize a new 
+                # If this path was just discovered by a beacon, we initialize a new
                 # PathCandidate object. It starts with default state (PROBING) and empty history.
                 self.candidates_map[p_key] = PathCandidate(p)
-            
-            # CASE: EXISTING PATH
-            # If the path exists in the map, we do nothing. The existing object
-            # (which holds valuable RTT history and scores) stays in memory.
-            
+
+                # If probing is enabled, use probe data for initial latency
+                if self.probing_enabled:
+                    probe_latency = self.get_path_latency(p)
+                    if probe_latency is not None:
+                        self.candidates_map[p_key].avg_latency = probe_latency
+                        self.candidates_map[p_key].latency_history = [probe_latency]
+            else:
+                # CASE: EXISTING PATH
+                # Update with latest probe data if available
+                if self.probing_enabled:
+                    probe_latency = self.get_path_latency(p)
+                    if probe_latency is not None:
+                        candidate = self.candidates_map[p_key]
+                        # Merge probe data with feedback data
+                        # Probe data can supplement when no recent feedback exists
+                        if len(candidate.latency_history) == 0:
+                            candidate.update_latency(probe_latency)
+
             # 4. Aggregation:
             # We retrieve the specific object (whether new or old) and add it to our current list.
             current_candidates.append(self.candidates_map[p_key])
-            
+
         # Return the list of stateful objects to be filtered and scored
         return current_candidates
     

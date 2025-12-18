@@ -118,7 +118,31 @@ class Router(Node):
                     beacon_copy = packet.clone()
                     link.enqueue(beacon_copy)
 
-        else: # Data packet
+        else: # Data packet or probe packet
+            # Check if this is a probe packet that reached its destination
+            if hasattr(packet, 'is_probe') and packet.is_probe:
+                try:
+                    current_hop_index = packet.path.index(self.node_id)
+                    # If this is the last hop (destination router), reflect the probe back
+                    if current_hop_index == len(packet.path) - 1:
+                        # Reverse the path and send probe back
+                        packet.path = list(reversed(packet.path))
+                        packet.source, packet.destination = packet.destination, packet.source
+                        # Forward back along reversed path
+                        next_hop = packet.path[1]
+                        if next_hop in self.ports:
+                            self.ports[next_hop].enqueue(packet)
+                        return
+                    else:
+                        # Forward probe to next hop
+                        next_hop = packet.path[current_hop_index + 1]
+                        if next_hop in self.ports:
+                            self.ports[next_hop].enqueue(packet)
+                        return
+                except (ValueError, IndexError):
+                    print(f"[{self.env.now:.2f}] Router {self.node_id}: Invalid probe path. Dropping.")
+                    return
+
             if packet.destination == self.node_id:
                 # Packet for a host in this AS, find the host link
                 # This part needs a more complex routing logic in a full implementation
@@ -142,6 +166,7 @@ class Host(Node):
         self.topology = topology
         self.in_queue = simpy.Store(env)
         self.application = None # To be set by the application instance
+        self.path_selector = None  # To be set if this host is used for probing
 
     def send_packet(self, packet):
         # Send to the connected router
@@ -152,4 +177,16 @@ class Host(Node):
             print(f"Error: Host {self.node_id} has no link to router {router_id}")
 
     def receive_packet(self, packet):
+        # Check if this is a returning probe packet
+        if hasattr(packet, 'is_probe') and packet.is_probe:
+            # Calculate RTT
+            rtt = self.env.now - packet.timestamp
+            packet.rtt = rtt
+
+            # Update path selector with probe result if available
+            if self.path_selector and hasattr(self.path_selector, 'update_probe_result'):
+                self.path_selector.update_probe_result(packet.probe_id, rtt)
+            return
+
+        # Regular packet - put in application queue
         self.in_queue.put(packet)

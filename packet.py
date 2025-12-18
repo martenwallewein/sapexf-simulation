@@ -57,3 +57,13 @@ class BeaconPacket(Packet):
     def clone(self):
         """Create a deep copy of this beacon"""
         return copy.deepcopy(self)
+
+class ProbePacket(Packet):
+    """Probe packet for measuring path latency"""
+    def __init__(self, source, destination, path, probe_id=None, timestamp=None):
+        super().__init__(source=source, destination=destination, path=path,
+                         payload="", size=64, is_beacon=False)
+        self.probe_id = probe_id  # Unique identifier for this probe
+        self.timestamp = timestamp or time.time()  # When probe was sent
+        self.is_probe = True  # Flag to identify probe packets
+        self.rtt = None  # Round-trip time (set when probe returns)

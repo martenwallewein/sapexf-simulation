@@ -1028,6 +1028,340 @@ def print_results(self):
 4. **Multiple Events**: Space events apart to observe individual effects
 5. **Application Start Time**: Ensure apps start before failure events if testing failover
 
+## Path Probing
+
+The framework supports **active path probing** to measure path latency independently of application traffic. This enables path selection algorithms to gather latency information before sending data or when application traffic is sparse.
+
+### Features
+
+- **Periodic Probing**: Automatically probe paths at configurable intervals
+- **Non-intrusive**: Small probe packets (64 bytes) with minimal overhead
+- **Round-trip Measurement**: Probes are reflected at destination routers
+- **Historical Data**: Maintains sliding window of recent probe measurements
+- **Algorithm Integration**: Probe results seamlessly integrate with path selection
+
+### Quick Example
+
+Enable probing in your path selection algorithm:
+
+```python
+from path_selection import SapexAlgorithm
+
+# Create algorithm with probing enabled
+algorithm = SapexAlgorithm(
+    topology,
+    use_beaconing=True,
+    enable_probing=True,
+    probing_interval=1000  # Probe every 1000ms
+)
+```
+
+### How It Works
+
+#### 1. Probe Packet Structure
+
+Probes are lightweight packets designed for latency measurement:
+
+```python
+class ProbePacket(Packet):
+    probe_id: str       # Unique identifier
+    timestamp: float    # Send time (for RTT calculation)
+    is_probe: bool      # Flag to identify probe packets
+    rtt: float          # Round-trip time (set on return)
+```
+
+#### 2. Probing Process
+
+The probing system operates as a SimPy process that runs periodically:
+
+```python
+# From path_selection.py
+def probe_paths(self):
+    while True:
+        yield self.env.timeout(self.probing_interval)
+
+        # Probe all known paths
+        for (src_as, dst_as), paths in self.path_store.items():
+            for path in paths:
+                # Send probe packet
+                probe = ProbePacket(source, destination, path, probe_id)
+                source_host.send_packet(probe)
+```
+
+#### 3. Probe Reflection
+
+Routers at path endpoints reflect probes back to the source:
+
+```python
+# From components.py - Router.receive_packet()
+if hasattr(packet, 'is_probe') and packet.is_probe:
+    if current_hop_index == len(packet.path) - 1:
+        # Reverse path and send back
+        packet.path = list(reversed(packet.path))
+        packet.source, packet.destination = packet.destination, packet.source
+        self.ports[next_hop].enqueue(packet)
+```
+
+#### 4. RTT Calculation
+
+When probes return, hosts calculate RTT and update the algorithm:
+
+```python
+# From components.py - Host.receive_packet()
+if hasattr(packet, 'is_probe') and packet.is_probe:
+    rtt = self.env.now - packet.timestamp
+    packet.rtt = rtt
+    self.path_selector.update_probe_result(packet.probe_id, rtt)
+```
+
+#### 5. Result Storage
+
+Probe results are stored with a sliding window:
+
+```python
+# From path_selection.py
+def update_probe_result(self, probe_id, rtt):
+    path_tuple, send_time = self.pending_probes[probe_id]
+
+    if path_tuple not in self.probe_results:
+        self.probe_results[path_tuple] = []
+
+    self.probe_results[path_tuple].append(rtt)
+
+    # Keep only last 10 measurements
+    if len(self.probe_results[path_tuple]) > 10:
+        self.probe_results[path_tuple].pop(0)
+```
+
+### Enabling Probing
+
+#### Method 1: Algorithm Constructor (Recommended)
+
+Enable probing when creating the algorithm:
+
+```python
+# For SapexAlgorithm
+algorithm = SapexAlgorithm(
+    topology,
+    use_beaconing=True,
+    enable_probing=True,
+    probing_interval=1000  # milliseconds
+)
+```
+
+#### Method 2: Manual Configuration
+
+Enable probing programmatically:
+
+```python
+# After creating algorithm
+algorithm.probing_interval = 1000  # Set interval
+
+# In simulation, probing is automatically enabled if interval is set
+# The simulation checks for this and starts the probing process
+```
+
+### Configuration Parameters
+
+- **`enable_probing`** (bool): Enable/disable probing (default: False)
+- **`probing_interval`** (int): Milliseconds between probe cycles (e.g., 1000)
+- **Probe packet size**: Fixed at 64 bytes (configured in ProbePacket class)
+- **History window**: Last 10 measurements per path (configurable in update_probe_result)
+
+### Using Probe Data in Algorithms
+
+#### Accessing Probe Results
+
+```python
+# Get average RTT for a path
+avg_latency = self.get_path_latency(router_path)
+
+if avg_latency is not None:
+    print(f"Path latency: {avg_latency:.2f}ms")
+```
+
+#### SapexAlgorithm Integration
+
+The SapexAlgorithm automatically uses probe data:
+
+```python
+def _sync_candidates(self, source_as, destination_as):
+    for p in raw_paths:
+        if p_key not in self.candidates_map:
+            self.candidates_map[p_key] = PathCandidate(p)
+
+            # Use probe data for initial latency
+            if self.probing_enabled:
+                probe_latency = self.get_path_latency(p)
+                if probe_latency is not None:
+                    self.candidates_map[p_key].avg_latency = probe_latency
+```
+
+#### Custom Algorithm Example
+
+```python
+class LatencyAwareAlgorithm(PathSelectionAlgorithm):
+    def select_path(self, source_as, destination_as):
+        paths = self.path_store.get((source_as, destination_as), [])
+
+        # Filter unavailable paths
+        available = [p for p in paths if self.is_path_available(p)]
+
+        # Sort by probed latency
+        path_latencies = []
+        for path in available:
+            latency = self.get_path_latency(path)
+            if latency is not None:
+                path_latencies.append((path, latency))
+
+        if path_latencies:
+            # Return path with lowest probed latency
+            return min(path_latencies, key=lambda x: x[1])[0]
+
+        # Fallback to shortest path if no probe data
+        return min(available, key=len) if available else None
+```
+
+### Probing vs. Application Feedback
+
+The framework supports two methods for gathering path metrics:
+
+| Feature | Probing | Application Feedback |
+|---------|---------|---------------------|
+| **Timing** | Periodic, independent | On-demand, with traffic |
+| **Data** | RTT only | RTT + packet loss |
+| **Overhead** | Fixed probe traffic | No extra packets |
+| **Availability** | All paths | Only used paths |
+| **Use Case** | Initial assessment | Real-time monitoring |
+
+**Best Practice**: Use both together:
+- Probing provides initial latency estimates for all paths
+- Application feedback provides real-time performance of selected paths
+- SapexAlgorithm merges both data sources for optimal decisions
+
+### Example Output
+
+When probing is enabled, you'll see:
+
+```
+All available paths discovered:
+  Paths from 1-ff00:0:111 to 1-ff00:0:112:
+    1: 1-ff00:0:111-br1-111-1 -> 1-ff00:0:110-br1-110-1 -> 1-ff00:0:112-br1-112-1
+
+Path probing enabled with 1000ms interval
+
+[2000.00] Starting applications based on traffic scenario...
+[3000.00] Probe cycle: 3 paths probed
+[4000.00] Probe cycle: 3 paths probed
+```
+
+### Performance Considerations
+
+#### Overhead Analysis
+
+With N paths and probing interval I (ms):
+- **Probe rate**: N probes every I milliseconds
+- **Bandwidth**: N × 64 bytes every I ms
+- **Example**: 10 paths, 1000ms interval = 640 bytes/sec ≈ 5 Kbps
+
+#### Optimization Tips
+
+1. **Adjust Interval**: Longer intervals reduce overhead
+   ```python
+   probing_interval=5000  # Probe every 5 seconds
+   ```
+
+2. **Selective Probing**: Modify `probe_paths()` to probe only candidate paths
+   ```python
+   # Only probe paths that meet certain criteria
+   for path in paths:
+       if self.is_candidate_path(path):
+           # Send probe
+   ```
+
+3. **Adaptive Probing**: Vary interval based on network conditions
+   ```python
+   # Probe more frequently during instability
+   if self.detect_instability():
+       self.probing_interval = 500
+   else:
+       self.probing_interval = 2000
+   ```
+
+### Advanced Usage
+
+#### Probe-based Path Discovery
+
+Use probing to validate beaconing-discovered paths:
+
+```python
+def validate_path(self, path):
+    """Check if path is actually functional via probing"""
+    probe_latency = self.get_path_latency(path)
+
+    if probe_latency is None:
+        # Path not yet probed
+        return True
+
+    # Mark path down if latency is suspiciously high
+    if probe_latency > 1000:  # 1 second timeout
+        self.mark_path_down(path)
+        return False
+
+    return True
+```
+
+#### Combining with Path Failure Events
+
+Probing can detect failures before explicit events:
+
+```python
+# In your algorithm
+def check_probe_health(self):
+    """Automatically mark paths down based on probe failures"""
+    for path_tuple, measurements in self.probe_results.items():
+        if len(measurements) >= 5:
+            recent_avg = sum(measurements[-5:]) / 5
+
+            # If latency increased significantly, mark as degraded
+            if recent_avg > self.max_latency * 2:
+                self.mark_path_down(list(path_tuple))
+```
+
+### Troubleshooting
+
+#### No Probe Data Available
+
+**Symptom**: `get_path_latency()` returns None
+
+**Causes**:
+- Probing not enabled
+- Insufficient time for first probe cycle
+- No hosts available in source AS
+
+**Solution**:
+```python
+# Ensure probing is enabled with interval
+algorithm.probing_interval = 1000
+
+# Wait for at least one probe cycle after beaconing
+yield self.env.timeout(2000 + 1000)  # beaconing + one probe cycle
+```
+
+#### Probes Not Returning
+
+**Symptom**: Probes sent but no RTT measurements
+
+**Causes**:
+- Path incorrect or broken
+- Router not reflecting probes
+- Host not processing probe responses
+
+**Debug**:
+- Add logging in Router.receive_packet() for probe handling
+- Verify path format matches discovered paths
+- Check that hosts have path_selector set
+
 ## Contributing
 
 To extend the framework:
