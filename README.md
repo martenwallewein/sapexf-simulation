@@ -1362,6 +1362,378 @@ yield self.env.timeout(2000 + 1000)  # beaconing + one probe cycle
 - Verify path format matches discovered paths
 - Check that hosts have path_selector set
 
+## UMCC: Shared Bottleneck Detection
+
+### Overview
+
+UMCC (Unsupervised Multi-path Congestion Control) is a shared bottleneck detection algorithm that identifies when multiple paths are experiencing congestion due to a common network bottleneck. When detected, the algorithm selects only one representative path that uses the bottleneck to avoid redundant traffic on the congested resource.
+
+This implementation is based on the 2024 research paper on shared bottleneck detection in multipath networks.
+
+### Key Features
+
+- **Automatic Congestion Detection**: Monitors RTT, throughput, and packet loss on all active paths
+- **Interface-Level Bottleneck Identification**: Uses SCION Border Router interface IDs to pinpoint exact bottleneck locations
+- **Smart Path Selection**: When multiple paths share a bottleneck, keeps only the best performing one
+- **Continuous Monitoring**: Repeats detection as network conditions change
+
+### How It Works
+
+#### Algorithm Steps (from the 2024 paper)
+
+1. **Measure Metrics**: Track RTT, throughput, and packet loss on each used path
+2. **Detect Degradation**: Watch for packet loss, RTT increases, or throughput decreases
+3. **Find Affected Paths**: Identify at least two paths experiencing similar degradation
+4. **Assign Interface IDs**: Each SCION Border Router interface gets a globally unique ID (ISD-AS-RouterID)
+5. **Compute Intersection**: Build intersection of all interface IDs from affected paths
+6. **Filter False Positives**: Remove interfaces that also appear in non-affected paths
+7. **Select Representative**: Keep only one path that uses the shared bottleneck
+8. **Repeat**: Continue monitoring for additional congestion events
+
+#### Congestion Detection Criteria
+
+A path is considered congested when **at least two** of the following conditions are met:
+
+- **RTT Increase**: Recent RTT > Baseline RTT × 1.5 (50% increase)
+- **High Packet Loss**: Loss rate > 5%
+- **Throughput Decrease**: Recent throughput < Baseline throughput × 0.7 (30% decrease)
+
+### Configuration
+
+#### Enabling UMCC
+
+UMCC is enabled by default in the SapexAlgorithm. To disable it:
+
+```python
+from path_selection import SapexAlgorithm
+
+# Disable UMCC
+algorithm = SapexAlgorithm(topology, enable_umcc=False)
+
+# Or enable with custom parameters
+algorithm = SapexAlgorithm(
+    topology,
+    enable_umcc=True,
+    enable_probing=True,  # Recommended for better metrics
+    probing_interval=1000  # Probe every 1000ms
+)
+```
+
+#### Adjusting Detection Thresholds
+
+You can customize congestion detection sensitivity by modifying the PathCandidate class:
+
+```python
+# In path_selection.py, PathCandidate.detect_congestion()
+
+# More sensitive (detects congestion earlier)
+rtt_threshold_increase=1.3    # 30% RTT increase
+loss_threshold=0.03           # 3% packet loss
+throughput_decrease=0.8       # 20% throughput decrease
+
+# Less sensitive (avoids false positives)
+rtt_threshold_increase=2.0    # 100% RTT increase
+loss_threshold=0.10           # 10% packet loss
+throughput_decrease=0.5       # 50% throughput decrease
+```
+
+### Usage Example
+
+#### Creating a Scenario with Shared Bottleneck
+
+To test UMCC, create a topology where multiple paths share a common link:
+
+```
+AS 111 ──┬──> AS 110 (Core) ──┬──> AS 113
+         │                     │
+         └──> AS 112 (Core) ───┘
+```
+
+Both paths (111→110→113 and 111→112→113) might share the link 110→113.
+
+**topology.json** (shared bottleneck):
+```json
+{
+  "1-ff00:0:110": {
+    "core": true,
+    "border_routers": {
+      "br1-110-1": {
+        "interfaces": [
+          {"isd_as": "1-ff00:0:111", "neighbor_router": "br1-111-1", "latency_ms": 5, "bandwidth_mbps": 100},
+          {"isd_as": "1-ff00:0:113", "neighbor_router": "br1-113-1", "latency_ms": 10, "bandwidth_mbps": 50}
+        ]
+      }
+    },
+    "hosts": {"host1": {"addr": "10.0.0.1"}}
+  },
+  "1-ff00:0:112": {
+    "core": true,
+    "border_routers": {
+      "br1-112-1": {
+        "interfaces": [
+          {"isd_as": "1-ff00:0:111", "neighbor_router": "br1-111-1", "latency_ms": 5, "bandwidth_mbps": 100},
+          {"isd_as": "1-ff00:0:113", "neighbor_router": "br1-113-1", "latency_ms": 10, "bandwidth_mbps": 50}
+        ]
+      }
+    },
+    "hosts": {"host1": {"addr": "10.0.0.2"}}
+  }
+}
+```
+
+#### Simulating Bottleneck Congestion
+
+Use events to create congestion on the shared bottleneck:
+
+**traffic.json**:
+```json
+{
+  "duration_ms": 20000,
+  "flows": [
+    {
+      "name": "Flow1",
+      "source": "1-ff00:0:111,10.0.0.5",
+      "destination": "1-ff00:0:113,172.16.5.5",
+      "start_time_ms": 1000,
+      "data_size_kb": 10000
+    },
+    {
+      "name": "Flow2",
+      "source": "1-ff00:0:111,10.0.0.6",
+      "destination": "1-ff00:0:113,172.16.5.6",
+      "start_time_ms": 1000,
+      "data_size_kb": 10000
+    }
+  ],
+  "events": [
+    {
+      "type": "congestion",
+      "time_ms": 5000,
+      "description": "Simulated congestion on shared bottleneck 110→113"
+    }
+  ]
+}
+```
+
+### Expected Output
+
+When UMCC detects a shared bottleneck, you'll see output like:
+
+```
+[5000.00] UMCC: Detected congestion on 2 paths
+[5000.00] UMCC: Identified shared bottleneck interfaces: {'1-ff00:0:113-br1-113-1'}
+[5000.00] UMCC: Excluding path ['1-ff00:0:111-br1-111-1', '1-ff00:0:112-br1-112-1', '1-ff00:0:113-br1-113-1'] due to shared bottleneck
+[5000.00] App App-Flow2: Switched to alternative path
+```
+
+### Implementation Details
+
+#### Per-Path Metrics Tracking
+
+Each PathCandidate object tracks:
+
+```python
+class PathCandidate:
+    # RTT tracking
+    latency_history = []        # Last 10 RTT measurements
+    avg_latency = 1000.0        # Running average
+
+    # Loss tracking
+    packet_loss_count = 0
+    packets_sent = 0
+
+    # Throughput tracking
+    throughput_history = []     # Last 10 measurements (Mbps)
+    bytes_received = 0
+    last_throughput_time = 0
+
+    # Congestion state
+    is_congested = False
+    congestion_start_time = None
+    shared_bottleneck_interfaces = set()
+```
+
+#### Interface ID Assignment
+
+SCION Border Router interfaces are identified by their full router ID:
+
+```python
+def get_interface_ids(self):
+    """Extract interface IDs from router path"""
+    interface_ids = set()
+    for router_id in self.router_path:
+        # Router ID format: "1-ff00:0:110-br1-110-1"
+        # This serves as the interface ID
+        interface_ids.add(router_id)
+    return interface_ids
+```
+
+#### Bottleneck Detection Algorithm
+
+```python
+def detect_shared_bottlenecks(self, active_paths):
+    # Step 1-2: Detect congested paths
+    congested_paths = [p for p in active_paths if p.detect_congestion()]
+
+    if len(congested_paths) < 2:
+        return []  # Need at least 2 paths
+
+    # Step 3-5: Find common interfaces
+    common_interfaces = congested_paths[0].get_interface_ids()
+    for path in congested_paths[1:]:
+        common_interfaces = common_interfaces.intersection(path.get_interface_ids())
+
+    # Step 6: Remove interfaces in non-congested paths
+    for path in non_congested_paths:
+        common_interfaces = common_interfaces - path.get_interface_ids()
+
+    # Step 7: Return bottleneck
+    return [common_interfaces] if common_interfaces else []
+```
+
+### Performance Considerations
+
+#### Computational Complexity
+
+- **Congestion Detection**: O(n) where n = number of active paths
+- **Interface Intersection**: O(m × p) where m = paths, p = path length
+- **Overall**: O(n × m × p) - efficient for typical SCION path counts
+
+#### Memory Usage
+
+- **Per Path**: ~500 bytes (10 RTT samples + 10 throughput samples + metadata)
+- **100 Paths**: ~50 KB total memory overhead
+
+#### Timing Considerations
+
+- **Metrics Collection**: Real-time (per packet)
+- **Throughput Update**: Every 100ms window
+- **Congestion Detection**: Every path selection (on-demand)
+- **Minimum Detection Time**: Need 3+ RTT samples (~3-30 packets depending on send rate)
+
+### Advanced Usage
+
+#### Combining with Path Probing
+
+UMCC works best with path probing enabled for accurate baseline metrics:
+
+```python
+algorithm = SapexAlgorithm(
+    topology,
+    enable_umcc=True,
+    enable_probing=True,
+    probing_interval=500  # More frequent probing for faster detection
+)
+```
+
+#### Custom Congestion Detection
+
+Extend PathCandidate to implement custom detection logic:
+
+```python
+class CustomPathCandidate(PathCandidate):
+    def detect_congestion(self):
+        # Custom logic: detect based on jitter
+        if len(self.latency_history) < 3:
+            return False
+
+        jitter = max(self.latency_history[-3:]) - min(self.latency_history[-3:])
+        return jitter > 50  # High jitter threshold
+```
+
+#### Multi-Bottleneck Scenarios
+
+UMCC handles multiple independent bottlenecks:
+
+```python
+# Step 8: Repeat for additional congestion
+bottlenecks = detect_shared_bottlenecks(filtered_paths)
+# Returns: [
+#     {'1-ff00:0:110-br1-110-1'},  # Bottleneck 1
+#     {'1-ff00:0:112-br1-112-2'}   # Bottleneck 2
+# ]
+```
+
+### Troubleshooting
+
+#### No Bottleneck Detection
+
+**Symptom**: UMCC doesn't detect obvious bottleneck
+
+**Causes**:
+- Insufficient traffic to trigger congestion metrics
+- Thresholds too high
+- Less than 2 paths affected
+- Paths don't share common interfaces
+
+**Solution**:
+```python
+# Lower detection thresholds
+candidate.detect_congestion(
+    rtt_threshold_increase=1.2,  # 20% increase
+    loss_threshold=0.02,          # 2% loss
+    throughput_decrease=0.8       # 20% decrease
+)
+
+# Ensure sufficient traffic
+data_size_kb=10000  # Large transfer to accumulate metrics
+```
+
+#### False Positive Detection
+
+**Symptom**: UMCC detects bottleneck when paths are independent
+
+**Causes**:
+- Network-wide congestion affecting all paths equally
+- Thresholds too sensitive
+- Insufficient filtering of common interfaces
+
+**Solution**:
+```python
+# Raise thresholds
+rtt_threshold_increase=1.8  # Require 80% RTT increase
+loss_threshold=0.08         # 8% loss threshold
+
+# Verify path independence in topology
+# Ensure paths don't actually share bottleneck links
+```
+
+#### Metrics Not Updating
+
+**Symptom**: `throughput_history` or `latency_history` empty
+
+**Causes**:
+- No traffic on path
+- update_path_feedback() not called
+- Packet size not passed correctly
+
+**Debug**:
+```python
+# Add logging in update_path_feedback
+print(f"Updating feedback: path={router_path}, latency={latency_sample}, loss={is_loss}")
+
+# Verify application calls feedback
+if hasattr(self.path_selector, 'update_path_feedback'):
+    self.path_selector.update_path_feedback(packet.path, latency, False, packet.size)
+```
+
+### Limitations
+
+1. **Requires Active Traffic**: Needs packet exchanges to detect congestion (passive paths not monitored)
+2. **Detection Latency**: Requires 3+ measurements before detection possible
+3. **False Positives**: Network-wide events may trigger incorrect bottleneck identification
+4. **Interface Granularity**: Detection at router level, not link level
+
+### Future Enhancements
+
+Potential improvements to UMCC:
+
+1. **Adaptive Thresholds**: Automatically adjust based on network conditions
+2. **Machine Learning**: Use ML models for congestion prediction
+3. **Path Quality Scores**: Incorporate bottleneck information into path scoring
+4. **Explicit Congestion Notification**: Support ECN marks for faster detection
+5. **Hierarchical Bottlenecks**: Detect bottlenecks at multiple network layers
+
 ## Contributing
 
 To extend the framework:

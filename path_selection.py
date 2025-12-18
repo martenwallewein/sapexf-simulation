@@ -271,13 +271,24 @@ class PathCandidate:
         self.router_path = router_path      # The actual list of router IDs
         self.state = "PROBING"              # INACTIVE, PROBING, ACTIVE, COOLDOWN
         self.score = 0.0                    # S(p,a)
-        
+
         # Metrics for filtering
-        self.latency_history = [] 
+        self.latency_history = []
         self.avg_latency = 1000.0               # Default high RTT until measured
         self.packet_loss_count = 0
         self.packets_sent = 0
         self.cost = 1                       # Cost to budget (simplified to 1 per path)
+
+        # UMCC: Throughput tracking
+        self.throughput_history = []        # Bytes/sec over time windows
+        self.bytes_sent = 0
+        self.bytes_received = 0
+        self.last_throughput_time = 0
+
+        # UMCC: Congestion detection state
+        self.is_congested = False
+        self.congestion_start_time = None
+        self.shared_bottleneck_interfaces = set()  # Set of interface IDs in shared bottleneck
 
     def update_latency(self, latency):
         self.latency_history.append(latency)
@@ -286,10 +297,89 @@ class PathCandidate:
             self.latency_history.pop(0)
         self.avg_latency = sum(self.latency_history) / len(self.latency_history)
 
+    def update_throughput(self, bytes_transferred, time_window):
+        """
+        Update throughput measurement.
+
+        Args:
+            bytes_transferred: Number of bytes in the time window
+            time_window: Duration in milliseconds
+        """
+        if time_window > 0:
+            throughput_mbps = (bytes_transferred * 8) / (time_window * 1000)  # Convert to Mbps
+            self.throughput_history.append(throughput_mbps)
+            # Keep last 10 measurements
+            if len(self.throughput_history) > 10:
+                self.throughput_history.pop(0)
+
+    def get_avg_throughput(self):
+        """Get average throughput in Mbps"""
+        if not self.throughput_history:
+            return 0.0
+        return sum(self.throughput_history) / len(self.throughput_history)
+
+    def get_loss_rate(self):
+        """Calculate current packet loss rate"""
+        if self.packets_sent == 0:
+            return 0.0
+        return self.packet_loss_count / self.packets_sent
+
+    def detect_congestion(self, rtt_threshold_increase=1.5, loss_threshold=0.05, throughput_decrease=0.7):
+        """
+        Detect if this path is experiencing congestion based on recent metrics.
+
+        Args:
+            rtt_threshold_increase: RTT increase ratio to trigger congestion (e.g., 1.5 = 50% increase)
+            loss_threshold: Packet loss rate threshold (e.g., 0.05 = 5%)
+            throughput_decrease: Throughput decrease ratio (e.g., 0.7 = 30% decrease)
+
+        Returns:
+            bool: True if congestion detected
+        """
+        # Need at least some history to detect changes
+        if len(self.latency_history) < 3:
+            return False
+
+        # Check for RTT increase
+        recent_rtt = sum(self.latency_history[-3:]) / 3
+        baseline_rtt = self.latency_history[0] if len(self.latency_history) > 0 else recent_rtt
+        rtt_increased = recent_rtt > baseline_rtt * rtt_threshold_increase
+
+        # Check for packet loss
+        loss_rate = self.get_loss_rate()
+        high_loss = loss_rate > loss_threshold
+
+        # Check for throughput decrease
+        throughput_decreased = False
+        if len(self.throughput_history) >= 3:
+            recent_throughput = sum(self.throughput_history[-3:]) / 3
+            baseline_throughput = self.throughput_history[0] if self.throughput_history else recent_throughput
+            if baseline_throughput > 0:
+                throughput_decreased = recent_throughput < baseline_throughput * throughput_decrease
+
+        # Congestion if any two conditions are met
+        congestion_signals = sum([rtt_increased, high_loss, throughput_decreased])
+        return congestion_signals >= 2
+
+    def get_interface_ids(self):
+        """
+        Extract interface IDs from the router path.
+        Each interface is identified as ISD-AS-RouterID.
+
+        Returns:
+            set: Set of interface IDs (strings) in this path
+        """
+        interface_ids = set()
+        for router_id in self.router_path:
+            # Router ID format: "1-ff00:0:110-br1-110-1"
+            # Interface ID is the full router ID
+            interface_ids.add(router_id)
+        return interface_ids
+
 
 class SapexAlgorithm(PathSelectionAlgorithm):
     # initialization method
-    def __init__(self, topology, use_beaconing=True, enable_probing=False, probing_interval=1000):
+    def __init__(self, topology, use_beaconing=True, enable_probing=False, probing_interval=1000, enable_umcc=True):
         super().__init__(topology)
         self.use_beaconing = use_beaconing
         self.discover_paths(use_graph_traversal=not use_beaconing)
@@ -312,6 +402,11 @@ class SapexAlgorithm(PathSelectionAlgorithm):
         # Set probing interval if enabled
         if enable_probing:
             self.probing_interval = probing_interval
+
+        # UMCC: Shared bottleneck detection
+        self.enable_umcc = enable_umcc
+        self.shared_bottlenecks = []  # List of sets of interface IDs that form bottlenecks
+        self.bottleneck_representatives = {}  # Maps bottleneck index to the chosen representative path
     
     #Step 1: Retrieve paths -- Beaconing integration needed
 
@@ -384,29 +479,30 @@ class SapexAlgorithm(PathSelectionAlgorithm):
 
     # BRIDGE METHOD: Called by Application to report metrics
          
-    def update_path_feedback(self, router_path, latency_sample, is_loss):
+    def update_path_feedback(self, router_path, latency_sample, is_loss, packet_size=1500):
         """
         Ingests real-time performance metrics from the Data Plane (Application)
         into the Control Plane (Algorithm Memory).
-        
+
         Args:
             router_path (list): The sequence of router IDs used by the packet.
             latency_sample (float): One-way latency in milliseconds (ignored if is_loss=True).
             is_loss (bool): True if the packet was dropped, False if it arrived.
+            packet_size (int): Size of the packet in bytes (for throughput calculation).
         """
-        
+
         # Convert the mutable list of routers into an immutable tuple.
         # This allows us to use the path as a hashable key to look up our memory object.
         p_key = tuple(router_path)
-        
+
         # Ensuring that we actually have a record (PathCandidate) for this specific path.
         if p_key in self.candidates_map:
-            
+
             # Changes made to 'candidate' here persist in self.candidates_map.
             candidate = self.candidates_map[p_key]
-            
+
             candidate.packets_sent += 1
-            
+
             if is_loss:
                 # Case: Packet Loss
                 # Increment the loss counter (Numerator for loss rate).
@@ -414,11 +510,152 @@ class SapexAlgorithm(PathSelectionAlgorithm):
                 candidate.packet_loss_count += 1
             else:
                 # Case: Successful Delivery
-                # Pass the latency sample to the candidate object to update 
+                # Pass the latency sample to the candidate object to update
                 # its internal sliding window average.
-                candidate.update_latency(latency_sample)    
-        
-        
+                candidate.update_latency(latency_sample)
+
+                # UMCC: Update throughput tracking
+                candidate.bytes_received += packet_size
+                if candidate.last_throughput_time > 0:
+                    time_window = self.env.now - candidate.last_throughput_time if self.env else 1
+                    if time_window >= 100:  # Update every 100ms
+                        candidate.update_throughput(candidate.bytes_received, time_window)
+                        candidate.bytes_received = 0
+                        candidate.last_throughput_time = self.env.now if self.env else 0
+                else:
+                    candidate.last_throughput_time = self.env.now if self.env else 0
+
+    def detect_shared_bottlenecks(self, active_paths):
+        """
+        UMCC Algorithm 1: Shared Bottleneck Detection
+        Implements the shared bottleneck detection algorithm from the 2024 paper.
+
+        Args:
+            active_paths (list): List of PathCandidate objects currently in use
+
+        Returns:
+            list: List of sets, where each set contains interface IDs of a shared bottleneck
+        """
+        if not self.enable_umcc or len(active_paths) < 2:
+            return []
+
+        # Step 1: Measure RTT, throughput, and packet loss on each used path
+        # (Already done via update_path_feedback)
+
+        # Step 2: Watch for packet loss, RTT, and throughput decreases, or delay increases
+        congested_paths = []
+        for path_candidate in active_paths:
+            if path_candidate.detect_congestion():
+                congested_paths.append(path_candidate)
+                if not path_candidate.is_congested:
+                    path_candidate.is_congested = True
+                    path_candidate.congestion_start_time = self.env.now if self.env else 0
+
+        # Step 3: If it affects at least two paths with minimal similarity
+        if len(congested_paths) < 2:
+            return []
+
+        print(f"[{self.env.now if self.env else 0:.2f}] UMCC: Detected congestion on {len(congested_paths)} paths")
+
+        # Step 4: Assign each SCION Border Router interface a globally unique ID (ISD-AS-Intf)
+        # (Already implemented in PathCandidate.get_interface_ids())
+
+        # Step 5: Build the intersection of all included interface IDs of all affected paths
+        if not congested_paths:
+            return []
+
+        # Start with interfaces from the first congested path
+        common_interfaces = congested_paths[0].get_interface_ids()
+
+        # Intersect with all other congested paths
+        for path_candidate in congested_paths[1:]:
+            common_interfaces = common_interfaces.intersection(path_candidate.get_interface_ids())
+
+        # If no common interfaces, there's no shared bottleneck
+        if not common_interfaces:
+            return []
+
+        # Step 6: Check all other paths that are not affected by the same event.
+        # If an interface is also in another path, remove it from the list.
+        non_congested_paths = [p for p in active_paths if p not in congested_paths]
+
+        for path_candidate in non_congested_paths:
+            path_interfaces = path_candidate.get_interface_ids()
+            # Remove interfaces that appear in non-congested paths
+            common_interfaces = common_interfaces - path_interfaces
+
+        # If no interfaces remain after filtering, no shared bottleneck
+        if not common_interfaces:
+            return []
+
+        print(f"[{self.env.now if self.env else 0:.2f}] UMCC: Identified shared bottleneck interfaces: {common_interfaces}")
+
+        # Mark congested paths with the shared bottleneck interfaces
+        for path_candidate in congested_paths:
+            path_candidate.shared_bottleneck_interfaces = common_interfaces
+
+        # Step 7: Keep only one path that uses the shared bottleneck
+        # Return the detected bottleneck as a set of interface IDs
+        return [common_interfaces]
+
+    def apply_bottleneck_constraints(self, filtered_paths):
+        """
+        Apply UMCC bottleneck constraints to path selection.
+        When multiple paths share a bottleneck, only select one representative path.
+
+        Args:
+            filtered_paths (list): List of PathCandidate objects after filtering
+
+        Returns:
+            list: Filtered list with only one path per shared bottleneck
+        """
+        if not self.enable_umcc or not filtered_paths:
+            return filtered_paths
+
+        # Detect shared bottlenecks among active/candidate paths
+        bottlenecks = self.detect_shared_bottlenecks(filtered_paths)
+
+        if not bottlenecks:
+            return filtered_paths
+
+        # For each bottleneck, keep only the best path
+        result_paths = []
+        excluded_paths = set()
+
+        for bottleneck_interfaces in bottlenecks:
+            # Find all paths that use this bottleneck
+            affected_paths = []
+            for path_candidate in filtered_paths:
+                path_interfaces = path_candidate.get_interface_ids()
+                # Check if this path uses any of the bottleneck interfaces
+                if bottleneck_interfaces.intersection(path_interfaces):
+                    affected_paths.append(path_candidate)
+
+            if not affected_paths:
+                continue
+
+            # Step 7: Keep only one path that uses the shared bottleneck
+            # Choose the path with the best metrics (lowest latency, lowest loss rate)
+            best_path = min(affected_paths,
+                          key=lambda p: (p.avg_latency, p.get_loss_rate()))
+
+            # Add the best path to results
+            if best_path not in result_paths:
+                result_paths.append(best_path)
+
+            # Mark others as excluded
+            for path in affected_paths:
+                if path != best_path:
+                    excluded_paths.add(tuple(path.router_path))
+                    print(f"[{self.env.now if self.env else 0:.2f}] UMCC: Excluding path {path.router_path} due to shared bottleneck")
+
+        # Add paths that don't use any bottleneck
+        for path_candidate in filtered_paths:
+            if tuple(path_candidate.router_path) not in excluded_paths and path_candidate not in result_paths:
+                result_paths.append(path_candidate)
+
+        return result_paths
+
     def select_path(self, source_as, destination_as):
 
         retrieved_paths = self._sync_candidates(source_as, destination_as)
@@ -448,6 +685,11 @@ class SapexAlgorithm(PathSelectionAlgorithm):
         #Fallback if strict filtering kills all paths(least-worst)
         if not filtered_paths:
             filtered_paths = retrieved_paths
+
+        # UMCC: Apply shared bottleneck detection and filtering
+        # Step 8: Repeat in case more congestion is located
+        if self.enable_umcc:
+            filtered_paths = self.apply_bottleneck_constraints(filtered_paths)
         
 
             

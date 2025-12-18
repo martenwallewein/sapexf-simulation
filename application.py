@@ -64,15 +64,16 @@ class Application:
             # --- FEEDBACK LOOP  ---
             # To close the control loop by feeding real-time Data Plane measurements
             # back into the Control Plane (Path Selection Algorithm).
-            
-            # We check if the current algorithm supports dynamic feedback, in order to make sure the simulation doesn't crash if we switch back to another 
+
+            # We check if the current algorithm supports dynamic feedback, in order to make sure the simulation doesn't crash if we switch back to another
             # algorithm (like ShortestPath) that doesn't implement 'update_path_feedback'.
             if hasattr(self.path_selector, 'update_path_feedback'):
-        
+
                 # We pass the physical path used as the key and the measured one-way latency as the value.
-                # Setting 'is_loss=False' instructs the algorithm to append this latency 
+                # Setting 'is_loss=False' instructs the algorithm to append this latency
                 # to its sliding window history, which will be used in the path's composite score.
-                self.path_selector.update_path_feedback(packet.path, latency, is_loss=False)
+                # UMCC: Also pass packet size for throughput tracking
+                self.path_selector.update_path_feedback(packet.path, latency, is_loss=False, packet_size=packet.size)
             print(f"[{self.env.now:.2f}] App {self.app_id}: Received packet/ACK after {latency:.2f}ms")
 
     def notify_loss(self, packet):
@@ -84,7 +85,8 @@ class Application:
             # We report the specific path that caused the packet drop.
             #Latency is passed as 0 (second argument)
             #Sets 'is_loss=True' to increment the loss counter of the algorithm
-            self.path_selector.update_path_feedback(packet.path, 0, is_loss=True)
+            # UMCC: Pass packet size even for lost packets to track total sent
+            self.path_selector.update_path_feedback(packet.path, 0, is_loss=True, packet_size=packet.size)
 
         print(f"[{self.env.now:.2f}] App {self.app_id}: Packet loss detected for flow to {packet.destination}")
 
