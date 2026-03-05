@@ -1,6 +1,7 @@
 # simulation.py
 import simpy
 import json
+import os
 from topology import Topology
 from application import Application
 from shortest_path_algorithm import ShortestPathAlgorithm
@@ -10,8 +11,14 @@ from app_registry import ApplicationRegistry
 class Simulation:
     def __init__(self, topology_file, traffic_file, algorithm_class=ShortestPathAlgorithm):
         self.env = simpy.Environment()
-        self.topology = Topology(self.env, topology_file)
+             
+        # Load traffic scenario (must be after event_manager is created)
+        self.traffic_scenario = self.load_traffic_scenario(traffic_file)
+        print(self.traffic_scenario)
+
+        self.topology = Topology(self.env, self.traffic_scenario['topology'])
         self.path_selection_algorithm = algorithm_class(self.topology)
+
         self.results = {"packet_loss": 0, "latencies": []}
 
         # Metrics collector (will be set by main.py if needed)
@@ -27,16 +34,30 @@ class Simulation:
             self.app_registry
         )
 
-        # Load traffic scenario (must be after event_manager is created)
-        self.traffic_scenario = self.load_traffic_scenario(traffic_file)
+
+        # Load events if present
+        if 'events' in self.traffic_scenario:
+            self.event_manager.load_events(self.traffic_scenario)
+
 
     def load_traffic_scenario(self, filename):
+        print(f"Loading traffic scenario from {filename}...")
+        if not os.path.isfile(filename):
+            raise FileNotFoundError(f"Traffic scenario file '{filename}' not found.")
+
         with open(filename, 'r') as f:
             scenario = json.load(f)
 
-        # Load events if present
-        if 'events' in scenario:
-            self.event_manager.load_events(scenario)
+        traffic_file = scenario.get('traffic')
+        if not traffic_file or not os.path.isfile(traffic_file):
+            raise FileNotFoundError(f"Traffic file '{traffic_file}' not found or not specified in scenario.")
+
+        with open(traffic_file, 'r') as f:
+            traffic = json.load(f)
+
+        scenario['flows'] = traffic['flows']
+        scenario['events'] = traffic['events']
+        scenario['duration_ms'] = traffic.get('duration_ms', 1000)
 
         return scenario
 
@@ -70,7 +91,6 @@ class Simulation:
                 self.path_selection_algorithm.enable_probing(interval, self.env, probe_hosts)
                 self.env.process(self.path_selection_algorithm.probe_paths())
                 print(f"\nPath probing enabled with {interval}ms interval")
-
 
         print("\nStarting applications based on traffic scenario...")
         for flow in self.traffic_scenario['flows']:
