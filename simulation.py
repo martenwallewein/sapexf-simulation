@@ -73,6 +73,21 @@ class Simulation:
             for i, path in enumerate(paths):
                  print(f"    {i+1}: {' -> '.join([str(hop) for hop in path])}")
 
+        # Pre-flight check: validate that each traffic flow has at least one AS-level path.
+        missing_flow_pairs = []
+        for flow in self.traffic_scenario.get('flows', []):
+            src_as = str(flow.get('source', '')).split(',')[0]
+            dst_as = str(flow.get('destination', '')).split(',')[0]
+            candidate_paths = self.path_selection_algorithm.path_store.get((src_as, dst_as), [])
+            if not candidate_paths:
+                missing_flow_pairs.append((flow.get('name', 'unnamed-flow'), src_as, dst_as))
+
+        if missing_flow_pairs:
+            print("\nWARNING: Some traffic flows have no discovered AS path before data-plane start:")
+            for flow_name, src_as, dst_as in missing_flow_pairs:
+                print(f"  - {flow_name}: {src_as} -> {dst_as} (0 paths)")
+            print("These flows will log 'No path found' and send 0 packets unless path discovery is expanded.")
+
         # Enable probing if the algorithm supports it
         if hasattr(self.path_selection_algorithm, 'enable_probing'):
             # Collect one host per AS for probing
