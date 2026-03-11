@@ -11,8 +11,8 @@ from app_registry import ApplicationRegistry
 class Simulation:
     def __init__(self, topology_file, traffic_file, algorithm_class=ShortestPathAlgorithm):
         self.env = simpy.Environment()
-             
-        # Load traffic scenario (must be after event_manager is created)
+
+        # Load and normalize the configured scenario before topology setup.
         self.traffic_scenario = self.load_traffic_scenario(traffic_file, topology_file)
 
         self.topology = Topology(self.env, self.traffic_scenario['topology'])
@@ -61,7 +61,6 @@ class Simulation:
         return None
 
     def load_traffic_scenario(self, filename, topology_file=None):
-        print(f"Loading traffic scenario from {filename}...")
         if not os.path.isfile(filename):
             raise FileNotFoundError(f"Traffic scenario file '{filename}' not found.")
 
