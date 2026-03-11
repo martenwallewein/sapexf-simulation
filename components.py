@@ -195,8 +195,17 @@ class Host(Node):
         self.isd_as = node_id.split(',')[0]
         self.topology = topology
         self.in_queue = simpy.Store(env)
+        self.flow_queues = {}
         self.application = None # To be set by the application instance
         self.path_selector = None  # To be set if this host is used for probing
+
+    def get_incoming_queue(self, flow_name=None):
+        """Return the queue for a specific flow, creating it lazily."""
+        if flow_name is None:
+            return self.in_queue
+        if flow_name not in self.flow_queues:
+            self.flow_queues[flow_name] = simpy.Store(self.env)
+        return self.flow_queues[flow_name]
 
     def send_packet(self, packet):
         # Send to the connected router
@@ -218,5 +227,7 @@ class Host(Node):
                 self.path_selector.update_probe_result(packet.probe_id, rtt)
             return
 
-        # Regular packet - put in application queue
-        self.in_queue.put(packet)
+        # Regular packet - demultiplex by flow name so handlers do not steal
+        # packets from other flows that share this destination host.
+        flow_name = getattr(packet, 'flow_name', None)
+        self.get_incoming_queue(flow_name).put(packet)

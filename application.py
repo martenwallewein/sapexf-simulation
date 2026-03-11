@@ -79,9 +79,10 @@ class Application:
             yield self.env.timeout(1) # Send a packet every 1ms
     
     def receive_handler(self):
+        flow_queue = self.destination.get_incoming_queue(self.flow_name)
         while True:
-            # Receive at the destination host queue for this flow.
-            packet = yield self.destination.in_queue.get()
+            # Receive only from this flow's destination queue.
+            packet = yield flow_queue.get()
 
             # Ignore control traffic or packets that do not belong to this flow.
             if getattr(packet, 'is_beacon', False):
