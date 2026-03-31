@@ -45,6 +45,8 @@ class MetricsCollector:
         self.path_packet_count = defaultdict(int)
         # path_tuple -> total bytes forwarded
         self.path_bytes = defaultdict(int)
+        # (from_node, to_node) -> {flow_name -> bytes_sent}
+        self.link_flow_bytes = defaultdict(lambda: defaultdict(int))
 
         # --- Global tracking ---
         self.all_latencies = []
@@ -85,6 +87,9 @@ class MetricsCollector:
         path_tuple = tuple(path)
         self.path_packet_count[path_tuple] += 1
         self.path_bytes[path_tuple] += packet_size
+
+        for from_node, to_node in zip(path_tuple[:-1], path_tuple[1:]):
+            self.link_flow_bytes[(from_node, to_node)][flow_name] += packet_size
 
         if flow_name not in self.flow_start_time:
             self.flow_start_time[flow_name] = sim_time
@@ -230,6 +235,26 @@ class MetricsCollector:
 
         return stats
 
+    def get_fairness_stats(self):
+        """Compute Jain's Fairness Index globally and per link.
+        Only flows that actually sent bytes on a link are included."""
+        global_values = [b for b in self.flow_bytes_sent.values() if b > 0]
+        global_jfi = self._jains_fairness_index(global_values)
+
+        per_link = {}
+        for link_key, flow_dict in self.link_flow_bytes.items():
+            active_flows = {fn: b for fn, b in flow_dict.items() if b > 0}
+            if not active_flows:
+                continue
+            link_str = f"{link_key[0]} -> {link_key[1]}"
+            per_link[link_str] = {
+                "num_flows": len(active_flows),
+                "jains_fairness_index": round(self._jains_fairness_index(list(active_flows.values())), 6),
+                "flow_bytes": active_flows,
+            }
+
+        return {"global_jfi": round(global_jfi, 6), "per_link": per_link}
+
     def get_per_path_stats(self):
         """Get utilization stats per path."""
         path_stats = {}
@@ -247,6 +272,7 @@ class MetricsCollector:
             "global": self.get_global_stats(),
             "per_flow": {},
             "per_path": self.get_per_path_stats(),
+            "fairness": self.get_fairness_stats(),
         }
 
         for flow_name in self.flow_packets_sent:
@@ -255,6 +281,20 @@ class MetricsCollector:
         return report
 
     # ---- Helpers ----
+
+    @staticmethod
+    def _jains_fairness_index(values):
+        """JFI = (sum(x_i))^2 / (n * sum(x_i^2)). Returns 0.0 for empty, 1.0 for single value."""
+        n = len(values)
+        if n == 0:
+            return 0.0
+        if n == 1:
+            return 1.0
+        sum_x = sum(values)
+        sum_x2 = sum(x * x for x in values)
+        if sum_x2 == 0:
+            return 1.0
+        return (sum_x ** 2) / (n * sum_x2)
 
     @staticmethod
     def _stddev(values):

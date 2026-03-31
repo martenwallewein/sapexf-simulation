@@ -53,6 +53,8 @@ class ResultLogger:
         self.save_per_path_csv(run_dir, report)
         self.save_raw_latencies_csv(run_dir, metrics_collector)
         self.save_path_switches_csv(run_dir, metrics_collector)
+        self.save_fairness_csv(run_dir, metrics_collector)
+        self.save_fairness_summary_csv(run_dir, report["fairness"])
 
     def save_config(self, run_dir, config):
         """Save experiment configuration."""
@@ -110,6 +112,7 @@ class ResultLogger:
             "latency_max_ms": global_stats.get("latency_max_ms", 0),
             "total_path_switches": global_stats.get("total_path_switches", 0),
             "wall_clock_seconds": global_stats.get("wall_clock_seconds", ""),
+            "global_jfi": report.get("fairness", {}).get("global_jfi", ""),
         }
 
         with open(filepath, 'w', newline='') as f:
@@ -163,6 +166,34 @@ class ResultLogger:
             for flow_name, latencies in metrics_collector.flow_latencies.items():
                 for lat in latencies:
                     writer.writerow([flow_name, round(lat, 4)])
+
+    def save_fairness_csv(self, run_dir, metrics_collector):
+        """Save per-link per-flow byte counts to fairness_per_link.csv."""
+        filepath = os.path.join(run_dir, "fairness_per_link.csv")
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["link", "flow_name", "bytes_sent"])
+            for link_key, flow_dict in metrics_collector.link_flow_bytes.items():
+                link_str = f"{link_key[0]} -> {link_key[1]}"
+                for flow_name, bytes_sent in sorted(flow_dict.items()):
+                    if bytes_sent > 0:
+                        writer.writerow([link_str, flow_name, bytes_sent])
+
+    def save_fairness_summary_csv(self, run_dir, fairness_stats):
+        """Save per-link JFI summary to fairness_summary.csv."""
+        filepath = os.path.join(run_dir, "fairness_summary.csv")
+        per_link = fairness_stats.get("per_link", {})
+        if not per_link:
+            return
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=["link", "num_flows", "jains_fairness_index"])
+            writer.writeheader()
+            for link_str, stats in sorted(per_link.items()):
+                writer.writerow({
+                    "link": link_str,
+                    "num_flows": stats["num_flows"],
+                    "jains_fairness_index": stats["jains_fairness_index"],
+                })
 
     def save_path_switches_csv(self, run_dir, metrics_collector):
         """Save path switch timeline for oscillation analysis."""
