@@ -53,9 +53,9 @@ class Router(Node):
         self.as_id = self.extract_as_from_router_id(node_id)
 
     def extract_as_from_router_id(self, router_id):
-        """Extract AS ID from router ID. E.g., '1-ff00:0:110-br1-110-1' -> '1-ff00:0:110'"""
-        # Format: ISD-ASff00:AS_ID-router_name
-        # Example: "1-ff00:0:110-br1-110-1" -> "1-ff00:0:110"
+        """Extract AS ID from router ID. E.g., '71-20965-br-fra-1' -> '71-20965'"""
+        # Format: ISD-AS-router_name
+        # Example: "71-20965-br-fra-1" -> "71-20965"
         # The AS part is everything before the last occurrence of a router name pattern
         # We can identify AS by looking for the pattern before "-br"
         if '-br' in router_id:
@@ -66,6 +66,12 @@ class Router(Node):
     def set_beaconing_process(self, beaconing_process):
         """Set the beaconing process for path registration"""
         self.beaconing_process = beaconing_process
+
+    def _report_packet_loss(self, packet):
+        """Notify application-level loss handler when a data packet is dropped."""
+        callback = getattr(packet, 'loss_callback', None)
+        if callable(callback):
+            callback(packet)
 
     def receive_packet(self, packet):
         # Beacon packets are handled by the beaconing process logic
@@ -112,6 +118,9 @@ class Router(Node):
 
             # Forward beacon to neighbors (not in AS path)
             for neighbor_id, link in self.ports.items():
+                # Beacons should propagate only across routers, not to end hosts.
+                if ',' in neighbor_id:
+                    continue
                 # Avoid router-level loops (additional safety check)
                 if neighbor_id not in packet.path:
                     # Clone beacon and forward
@@ -143,21 +152,42 @@ class Router(Node):
                     print(f"[{self.env.now:.2f}] Router {self.node_id}: Invalid probe path. Dropping.")
                     return
 
+            # If destination is a directly connected host, deliver it.
+            if packet.destination in self.ports:
+                self.ports[packet.destination].enqueue(packet)
+                return
+
             if packet.destination == self.node_id:
-                # Packet for a host in this AS, find the host link
-                # This part needs a more complex routing logic in a full implementation
-                pass
+                return
             else:
-                # Forward along the path
+                # Forward along the path using a cursor to avoid ambiguity when a
+                # router ID appears more than once in a composed path.
                 try:
-                    current_hop_index = packet.path.index(self.node_id)
+                    if not hasattr(packet, 'forward_hops'):
+                        packet.forward_hops = 0
+                    packet.forward_hops += 1
+
+                    # Guard against forwarding loops on malformed paths.
+                    if packet.forward_hops > (len(packet.path) + 2):
+                        print(f"[{self.env.now:.2f}] Router {self.node_id}: Loop guard drop for packet to {packet.destination}.")
+                        self._report_packet_loss(packet)
+                        return
+
+                    if hasattr(packet, 'path_cursor') and packet.path_cursor is not None:
+                        current_hop_index = packet.path_cursor
+                    else:
+                        current_hop_index = packet.path.index(self.node_id)
+
                     next_hop = packet.path[current_hop_index + 1]
                     if next_hop in self.ports:
+                        packet.path_cursor = current_hop_index + 1
                         self.ports[next_hop].enqueue(packet)
                     else:
                         print(f"[{self.env.now:.2f}] Router {self.node_id}: Dead end for packet to {packet.destination}. Dropping.")
+                        self._report_packet_loss(packet)
                 except (ValueError, IndexError):
                     print(f"[{self.env.now:.2f}] Router {self.node_id}: Invalid path on packet. Dropping.")
+                    self._report_packet_loss(packet)
 
 class Host(Node):
     def __init__(self, env, node_id, topology):
@@ -165,8 +195,17 @@ class Host(Node):
         self.isd_as = node_id.split(',')[0]
         self.topology = topology
         self.in_queue = simpy.Store(env)
+        self.flow_queues = {}
         self.application = None # To be set by the application instance
         self.path_selector = None  # To be set if this host is used for probing
+
+    def get_incoming_queue(self, flow_name=None):
+        """Return the queue for a specific flow, creating it lazily."""
+        if flow_name is None:
+            return self.in_queue
+        if flow_name not in self.flow_queues:
+            self.flow_queues[flow_name] = simpy.Store(self.env)
+        return self.flow_queues[flow_name]
 
     def send_packet(self, packet):
         # Send to the connected router
@@ -188,5 +227,7 @@ class Host(Node):
                 self.path_selector.update_probe_result(packet.probe_id, rtt)
             return
 
-        # Regular packet - put in application queue
-        self.in_queue.put(packet)
+        # Regular packet - demultiplex by flow name so handlers do not steal
+        # packets from other flows that share this destination host.
+        flow_name = getattr(packet, 'flow_name', None)
+        self.get_incoming_queue(flow_name).put(packet)
