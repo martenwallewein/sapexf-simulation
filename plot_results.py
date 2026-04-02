@@ -23,6 +23,10 @@ DEFAULT_METRICS = [
     "global_jfi",
 ]
 
+FAIRNESS_METRICS = {
+    "global_jfi",
+}
+
 
 def find_latest_all_results(results_dir: Path) -> Path:
     """Return the newest all_results.csv under results_dir."""
@@ -35,18 +39,24 @@ def find_latest_all_results(results_dir: Path) -> Path:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def validate_columns(df: pd.DataFrame, metrics: list[str]) -> None:
+def validate_columns(df: pd.DataFrame, metrics: list[str]) -> list[str]:
     required = {"algorithm", "scenario"}
     missing_required = sorted(required - set(df.columns))
     if missing_required:
         raise ValueError(f"Missing required columns: {missing_required}")
 
+    available_metrics = [m for m in metrics if m in df.columns]
     missing_metrics = [m for m in metrics if m not in df.columns]
     if missing_metrics:
-        raise ValueError(
-            "Missing metric columns in CSV: "
+        print(
+            "Skipping missing metric columns: "
             + ", ".join(missing_metrics)
         )
+
+    if not available_metrics:
+        raise ValueError("None of the requested metrics exist in the CSV.")
+
+    return available_metrics
 
 
 def plot_metric(df: pd.DataFrame, metric: str, output_dir: Path) -> Path:
@@ -70,6 +80,21 @@ def plot_metric(df: pd.DataFrame, metric: str, output_dir: Path) -> Path:
     ax.set_ylabel(metric)
     ax.grid(axis="y", alpha=0.3)
     ax.legend(title="Algorithm", bbox_to_anchor=(1.02, 1), loc="upper left")
+
+    # Fairness metrics are often tightly clustered near 1.0; zoom the axis to show differences.
+    if metric in FAIRNESS_METRICS:
+        values = pd.to_numeric(pivot.to_numpy().ravel(), errors="coerce")
+        values = values[~pd.isna(values)]
+        if len(values) > 0:
+            vmin = float(values.min())
+            vmax = float(values.max())
+            span = vmax - vmin
+            padding = max(span * 0.2, 0.002)
+            lower = max(0.0, vmin - padding)
+            upper = min(1.0, vmax + padding)
+            if upper <= lower:
+                upper = min(1.0, lower + 0.01)
+            ax.set_ylim(lower, upper)
 
     plt.tight_layout()
 
@@ -135,7 +160,7 @@ def main() -> int:
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 
     df = pd.read_csv(input_csv)
-    validate_columns(df, args.metrics)
+    metrics_to_plot = validate_columns(df, args.metrics)
 
     if args.scenario:
         df = df[df["scenario"] == args.scenario]
@@ -151,7 +176,7 @@ def main() -> int:
     print(f"Using input: {input_csv}")
     print(f"Writing plots to: {out_dir}")
 
-    for metric in args.metrics:
+    for metric in metrics_to_plot:
         output_file = plot_metric(df, metric, out_dir)
         print(f"Saved: {output_file}")
 
