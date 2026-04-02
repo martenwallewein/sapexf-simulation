@@ -122,6 +122,17 @@ EXPERIMENT_SETS = {
         "lambda_div": [0.5],
         "point_budget": [100],
     },
+    "paired_extremes": {
+        "description": "Edge-value comparison (1k/50k packets, 1k/10k t_round, 2k/10k cooldown)",
+        "algorithms": ALGORITHMS,
+        "topologies": ["sciera_large"],
+        "scenarios": list(SCENARIOS.keys()),
+        "num_packets": [1000, 50000],
+        "t_round_ms": [1000, 10000],
+        "cooldown_ms": [2000, 10000],
+        "lambda_div": [0.5],
+        "point_budget": [100],
+    },
     "full_sweep": {
         "description": "Full parameter sweep (WARNING: very many combinations!)",
         "algorithms": ALGORITHMS,
