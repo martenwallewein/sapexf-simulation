@@ -20,6 +20,7 @@ DEFAULT_METRICS = [
     "packet_loss_rate_percent",
     "total_packets_received",
     "total_path_switches",
+    "global_jfi",
 ]
 
 
@@ -50,8 +51,12 @@ def validate_columns(df: pd.DataFrame, metrics: list[str]) -> None:
 
 def plot_metric(df: pd.DataFrame, metric: str, output_dir: Path) -> Path:
     """Create one grouped bar chart for a metric."""
+    # Aggregate only numeric values; malformed cells become NaN and are ignored by mean().
+    metric_df = df.copy()
+    metric_df[metric] = pd.to_numeric(metric_df[metric], errors="coerce")
+
     grouped = (
-        df.groupby(["scenario", "algorithm"], as_index=False)[metric]
+        metric_df.groupby(["scenario", "algorithm"], as_index=False)[metric]
         .mean()
     )
 
