@@ -238,8 +238,14 @@ class MetricsCollector:
     def get_fairness_stats(self):
         """Compute Jain's Fairness Index globally and per link.
         Only flows that actually sent bytes on a link are included."""
-        global_values = [b for b in self.flow_bytes_sent.values() if b > 0]
-        global_jfi = self._jains_fairness_index(global_values)
+        active_flows = [
+            flow_name
+            for flow_name, sent in self.flow_packets_sent.items()
+            if sent > 0
+        ]
+
+        offered_values = [self.flow_bytes_sent.get(flow_name, 0) for flow_name in active_flows]
+        global_jfi = self._jains_fairness_index(offered_values)
 
         per_link = {}
         for link_key, flow_dict in self.link_flow_bytes.items():
@@ -253,7 +259,10 @@ class MetricsCollector:
                 "flow_bytes": active_flows,
             }
 
-        return {"global_jfi": round(global_jfi, 6), "per_link": per_link}
+        return {
+            "global_jfi": round(global_jfi, 6),
+            "per_link": per_link,
+        }
 
     def get_per_path_stats(self):
         """Get utilization stats per path."""
