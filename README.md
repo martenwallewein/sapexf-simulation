@@ -216,6 +216,25 @@ yield self.env.timeout(transmission_delay)  # Transmission delay
 
 ## Configuration
 
+### Experiment Presets
+
+`run_experiments.py` now includes a preset for the exact edge-value grid used in the comparison study:
+
+```bash
+python run_experiments.py --preset paired_extremes
+```
+
+Preset details:
+- Algorithms: all comparison algorithms
+- Topology: `sciera_large`
+- Scenarios: all built-in stress scenarios
+- Packets: `1000`, `50000`
+- `t_round_ms`: `1000`, `10000`
+- `cooldown_ms`: `2000`, `10000`
+- `lambda_div`: `0.5`
+- `point_budget`: `100`
+- Total runs: `960`
+
 ### Topology Configuration (topology.json)
 
 Define the network structure with ASes, routers, hosts, and links:
