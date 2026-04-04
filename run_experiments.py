@@ -17,11 +17,13 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import itertools
 import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -56,11 +58,11 @@ SCENARIOS = {
 
 # ---- Parameter sets ----
 # Network related
-NUM_PACKETS_OPTIONS = [1000, 2000, 5000, 10000, 20000, 50000]
+NUM_PACKETS_OPTIONS = [1000, 2000, 10000, 100000]
 PACKET_SIZE_BYTES = 1500  # Fixed per spec
 
 # Algorithm related
-T_ROUND_OPTIONS_MS = [1000, 2000, 5000, 10000]    # Allocation epoch (jitter)
+T_ROUND_OPTIONS_MS = [1000, 2000, 10000]    # Allocation epoch (jitter)
 COOLDOWN_OPTIONS_MS = [2000, 5000, 10000]          # Expiry times for cooldown
 LAMBDA_DIV_OPTIONS = [0.3, 0.5, 0.7, 1.0]         # Weight for diversity reward
 POINT_BUDGET_OPTIONS = [100, 250, 500]             # Application point budgets
@@ -87,34 +89,38 @@ EXPERIMENT_SETS = {
         "lambda_div": [0.5],
         "point_budget": [100],
     },
-    "algorithm_comparison": {
-        "description": "Compare all algorithms with fixed parameters across all scenarios",
+    "sapex_lambda_div": {
+        "description": "Compare SAPEX lambda_div settings against single baseline results from other algorithms",
         "algorithms": ALGORITHMS,
         "topologies": ["sciera_large"],
         "scenarios": list(SCENARIOS.keys()),
-        "num_packets": [5000],
+        "num_packets": [2000],
         "t_round_ms": [2000],
+        "cooldown_ms": [5000],
+        "lambda_div": LAMBDA_DIV_OPTIONS,
+        "point_budget": [100],
+        "baseline_algorithms": ["lowest_latency", "lowest_hop_count", "random", "round_robin"],
+        "baseline_lambda_div": 0.5,
+    },
+    "sapex_t_round": {
+        "description": "Compare SAPEX t_round settings against single baseline results from other algorithms",
+        "algorithms": ALGORITHMS,
+        "topologies": ["sciera_large"],
+        "scenarios": list(SCENARIOS.keys()),
+        "num_packets": [2000],
+        "t_round_ms": T_ROUND_OPTIONS_MS,
         "cooldown_ms": [5000],
         "lambda_div": [0.5],
         "point_budget": [100],
+        "baseline_algorithms": ["lowest_latency", "lowest_hop_count", "random", "round_robin"],
+        "baseline_t_round_ms": 2000,
     },
-    "sapex_tuning": {
-        "description": "Tune SAPEX parameters (T_round, cooldown, lambda_div, budget)",
-        "algorithms": ["sapex"],
+    "number_of_packets": {
+        "description": "Compare all algorithms at 1k, 10k, and 100k packet counts",
+        "algorithms": ALGORITHMS,
         "topologies": ["sciera_large"],
         "scenarios": list(SCENARIOS.keys()),
-        "num_packets": [5000],
-        "t_round_ms": T_ROUND_OPTIONS_MS,
-        "cooldown_ms": COOLDOWN_OPTIONS_MS,
-        "lambda_div": LAMBDA_DIV_OPTIONS,
-        "point_budget": POINT_BUDGET_OPTIONS,
-    },
-    "scalability": {
-        "description": "Test with increasing packet counts",
-        "algorithms": ["sapex", "round_robin", "lowest_latency"],
-        "topologies": ["sciera_large"],
-        "scenarios": ["thundering_herd"],
-        "num_packets": NUM_PACKETS_OPTIONS,
+        "num_packets": [1000, 10000, 100000],
         "t_round_ms": [2000],
         "cooldown_ms": [5000],
         "lambda_div": [0.5],
@@ -125,11 +131,11 @@ EXPERIMENT_SETS = {
         "algorithms": ALGORITHMS,
         "topologies": ["sciera_large"],
         "scenarios": list(SCENARIOS.keys()),
-        "num_packets": [1000, 5000, 10000],
+        "num_packets": NUM_PACKETS_OPTIONS,
         "t_round_ms": T_ROUND_OPTIONS_MS,
         "cooldown_ms": COOLDOWN_OPTIONS_MS,
         "lambda_div": LAMBDA_DIV_OPTIONS,
-        "point_budget": [100, 500],
+        "point_budget": POINT_BUDGET_OPTIONS,
     },
 }
 
@@ -139,18 +145,22 @@ EXPERIMENT_SETS = {
 # ============================================================================
 
 class ExperimentRunner:
-    def __init__(self, output_base_dir="results", dry_run=False, verbose=True, timeout_sec=600):
+    def __init__(self, output_base_dir="results", dry_run=False, verbose=True, timeout_sec=600, max_workers=1):
         self.output_base_dir = Path(output_base_dir)
         self.dry_run = dry_run
         self.verbose = verbose
         self.timeout_sec = timeout_sec
+        self.max_workers = max_workers
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_results = []
+        self._results_lock = threading.Lock()
+        self._log_lock = threading.Lock()
         self.logger = ResultLogger(base_dir=str(self.output_base_dir))
 
     def log(self, msg):
         if self.verbose:
-            print(msg)
+            with self._log_lock:
+                print(msg)
 
     def generate_experiment_configs(
         self,
@@ -162,6 +172,9 @@ class ExperimentRunner:
         cooldown_list,
         lambda_div_list,
         point_budget_list,
+        baseline_algorithms=None,
+        baseline_lambda_div=None,
+        baseline_t_round_ms=None,
     ):
         """
         Generate all experiment configurations using the nested loop:
@@ -170,9 +183,17 @@ class ExperimentRunner:
           3. Parameter set
         """
         configs = []
+        baseline_algorithms = set(baseline_algorithms or [])
 
         # Loop 1: Algorithms
         for algo in algorithms:
+            if algo in baseline_algorithms:
+                algo_lambda_values = [baseline_lambda_div if baseline_lambda_div is not None else lambda_div_list[0]]
+                algo_t_round_values = [baseline_t_round_ms if baseline_t_round_ms is not None else t_round_list[0]]
+            else:
+                algo_lambda_values = lambda_div_list
+                algo_t_round_values = t_round_list
+
             # Loop 2: Topologies
             for topo_name in topologies:
                 topo_file = TOPOLOGIES.get(topo_name, topo_name)
@@ -186,9 +207,9 @@ class ExperimentRunner:
                     # but we still run them to have comparable baselines
                     param_combos = list(itertools.product(
                         num_packets_list,
-                        t_round_list,
+                        algo_t_round_values,
                         cooldown_list,
-                        lambda_div_list,
+                        algo_lambda_values,
                         point_budget_list,
                     ))
 
@@ -266,10 +287,10 @@ class ExperimentRunner:
             )
 
             if result.returncode == 0:
-                self.log(f"  ✓ Completed")
+                self.log(f"  [OK] Completed")
                 status = "success"
             else:
-                self.log(f"  ✗ Failed (exit {result.returncode})")
+                self.log(f"  [FAIL] Failed (exit {result.returncode})")
                 status = "failed"
 
             return {
@@ -279,14 +300,14 @@ class ExperimentRunner:
             }
 
         except subprocess.TimeoutExpired:
-            self.log(f"  ✗ Timeout (>{self.timeout_sec}s)")
+            self.log(f"  [TIMEOUT] Timeout (>{self.timeout_sec}s)")
             return {"experiment": name, "status": "timeout"}
         except Exception as e:
-            self.log(f"  ✗ Error: {e}")
+            self.log(f"  [ERROR] Error: {e}")
             return {"experiment": name, "status": "error", "error": str(e)}
 
     def run_experiments(self, configs):
-        """Run all experiment configs."""
+        """Run all experiment configs, in parallel when max_workers > 1."""
         total = len(configs)
 
         self.log(f"\n{'='*70}")
@@ -294,12 +315,19 @@ class ExperimentRunner:
         self.log(f"  Timestamp:    {self.timestamp}")
         self.log(f"  Output:       {self.output_base_dir / self.timestamp}")
         self.log(f"  Total runs:   {total}")
+        self.log(f"  Workers:      {self.max_workers}")
         self.log(f"  Dry run:      {self.dry_run}")
         self.log(f"{'='*70}")
 
-        for i, config in enumerate(configs, 1):
+        def run_and_collect(args):
+            i, config = args
             result = self.run_single(config, i, total)
-            self.run_results.append(result)
+            with self._results_lock:
+                self.run_results.append(result)
+            return result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            list(executor.map(run_and_collect, enumerate(configs, 1)))
 
         self.save_summary()
         self.aggregate_all_stats()
@@ -398,8 +426,26 @@ def list_options():
 
     print("\n  PREDEFINED EXPERIMENT SETS:")
     for name, cfg in EXPERIMENT_SETS.items():
-        n_combos = (
-            len(cfg["algorithms"]) *
+        baseline_algorithms = set(cfg.get("baseline_algorithms", []))
+        varying_algorithms = [algo for algo in cfg["algorithms"] if algo not in baseline_algorithms]
+        baseline_count = len(baseline_algorithms)
+        varying_count = len(varying_algorithms)
+
+        baseline_t_round_count = 1 if cfg.get("baseline_t_round_ms") is not None else len(cfg["t_round_ms"])
+        baseline_lambda_count = 1 if cfg.get("baseline_lambda_div") is not None else len(cfg["lambda_div"])
+
+        baseline_combos = (
+            baseline_count *
+            len(cfg["topologies"]) *
+            len(cfg["scenarios"]) *
+            len(cfg["num_packets"]) *
+            baseline_t_round_count *
+            len(cfg["cooldown_ms"]) *
+            baseline_lambda_count *
+            len(cfg["point_budget"])
+        )
+        varying_combos = (
+            varying_count *
             len(cfg["topologies"]) *
             len(cfg["scenarios"]) *
             len(cfg["num_packets"]) *
@@ -408,6 +454,7 @@ def list_options():
             len(cfg["lambda_div"]) *
             len(cfg["point_budget"])
         )
+        n_combos = baseline_combos + varying_combos
         print(f"    - {name} ({n_combos} runs): {cfg['description']}")
 
     print()
@@ -498,8 +545,9 @@ def main():
         epilog="""
 Examples:
   python run_experiments.py --preset quick              # Quick smoke test
-  python run_experiments.py --preset algorithm_comparison
-  python run_experiments.py --preset sapex_tuning --dry-run
+  python run_experiments.py --preset sapex_lambda_div --dry-run
+  python run_experiments.py --preset sapex_t_round --dry-run
+  python run_experiments.py --preset number_of_packets --dry-run
 
   # Custom selection:
   python run_experiments.py \\
@@ -543,6 +591,8 @@ Examples:
                         help="Suppress verbose output")
     parser.add_argument("--timeout-sec", type=int, default=600,
                         help="Per-experiment timeout in seconds (default: 600)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel experiment workers (default: 1)")
 
     args = parser.parse_args()
 
@@ -591,6 +641,7 @@ Examples:
         dry_run=args.dry_run,
         verbose=not args.quiet,
         timeout_sec=args.timeout_sec,
+        max_workers=args.workers,
     )
 
     configs = runner.generate_experiment_configs(
@@ -602,6 +653,9 @@ Examples:
         cooldown_list=cooldown,
         lambda_div_list=lambda_div,
         point_budget_list=budget,
+        baseline_algorithms=preset.get("baseline_algorithms") if args.preset else None,
+        baseline_lambda_div=preset.get("baseline_lambda_div") if args.preset else None,
+        baseline_t_round_ms=preset.get("baseline_t_round_ms") if args.preset else None,
     )
 
     if not configs:

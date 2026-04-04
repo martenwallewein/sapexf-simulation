@@ -3,7 +3,7 @@ from packet import Packet
 import random
 
 class Application:
-    def __init__(self, env, app_id, source_host, dest_host, path_selector, flow_config, results_dict, app_registry=None, metrics_collector=None):
+    def __init__(self, env, app_id, source_host, dest_host, path_selector, flow_config, results_dict, app_registry=None, metrics_collector=None, num_packets=None, packet_size_bytes=1500):
         self.env = env
         self.app_id = app_id
         self.source = source_host
@@ -21,6 +21,8 @@ class Application:
         self.budget = 50 # budget for path selection
         self.maintenance_interval = 5000  # interval for periodic maintenance (in ms)
         self.flow_name = flow_config.get('name', app_id)
+        self.num_packets_override = num_packets  # Override traffic volume if specified
+        self.packet_size_bytes = packet_size_bytes
         
     def run(self):
         yield self.env.timeout(self.flow_config['start_time_ms'])
@@ -49,9 +51,14 @@ class Application:
         self.env.process(self._periodic_maintenance())
 
         # Send data
-        data_to_send_bytes = self.flow_config['data_size_kb'] * 1024
-        packet_size = 1500 # bytes
-        num_packets = data_to_send_bytes // packet_size
+        # Use num_packets override if provided (via experiment config), else use data_size_kb from flow
+        if self.num_packets_override is not None:
+            num_packets = self.num_packets_override
+            data_to_send_bytes = num_packets * self.packet_size_bytes
+            print(f"[{self.env.now:.2f}] App {self.app_id}: Using override num_packets={num_packets} (total {data_to_send_bytes / 1024:.1f} KB)")
+        else:
+            data_to_send_bytes = self.flow_config['data_size_kb'] * 1024
+            num_packets = data_to_send_bytes // self.packet_size_bytes
 
         for i in range(num_packets):
             # Check if path is down and attempt re-selection
@@ -67,7 +74,7 @@ class Application:
                 self.source.node_id,
                 self.destination.node_id,
                 self.current_path,
-                size=packet_size,
+                size=self.packet_size_bytes,
                 flow_name=self.flow_name,
                 loss_callback=self.notify_loss,
             )
@@ -75,7 +82,7 @@ class Application:
             self.source.send_packet(packet)
             self.packets_sent += 1
             if self.metrics_collector:
-                self.metrics_collector.record_packet_sent(self.flow_name, self.env.now, self.current_path, packet_size)
+                self.metrics_collector.record_packet_sent(self.flow_name, self.env.now, self.current_path, self.packet_size_bytes)
             yield self.env.timeout(1) # Send a packet every 1ms
     
     def receive_handler(self):
