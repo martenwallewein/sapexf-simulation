@@ -22,6 +22,9 @@ class Simulation:
 
         # Metrics collector (will be set by main.py if needed)
         self.metrics_collector = None
+        
+        # Configuration parameters (will be set by main.py if needed)
+        self.config_parameters = {}
 
         # Application registry for path-app tracking
         self.app_registry = ApplicationRegistry()
@@ -259,7 +262,8 @@ class Simulation:
                     flow_config,
                     self.results,
                     self.app_registry,
-                    metrics_collector=self.metrics_collector
+                    metrics_collector=self.metrics_collector,
+                    num_packets=self.config_parameters.get('num_packets')
                 )
                 self.env.process(app.run())
             else:

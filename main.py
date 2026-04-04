@@ -156,9 +156,9 @@ def main():
 
     # Pass additional parameters to simulation if provided
     params = settings.get("parameters", {})
-    if params:
-        sim.config_parameters = params
+    sim.config_parameters = params  # Always set, even if empty
 
+    if params:
         # Apply algorithm-specific parameters
         algo = sim.path_selection_algorithm
         if hasattr(algo, 'T_round') and "t_round_ms" in params:
