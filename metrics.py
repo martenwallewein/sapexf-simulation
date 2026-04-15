@@ -237,9 +237,36 @@ class MetricsCollector:
 
     def get_fairness_stats(self):
         """Compute Jain's Fairness Index globally and per link.
-        Only flows that actually sent bytes on a link are included."""
-        global_values = [b for b in self.flow_bytes_sent.values() if b > 0]
-        global_jfi = self._jains_fairness_index(global_values)
+
+        Global JFI is computed on per-flow *effective throughput*
+        (bytes_sent / transfer_time_ms) rather than raw bytes_sent.
+        Using raw bytes_sent is not meaningful because the volume each flow
+        sends is fixed by the scenario file and is identical across all
+        algorithms, so JFI would always be ~1.0 regardless of how well the
+        algorithm distributes load.  Throughput captures the actual service
+        quality a flow received: flows assigned to congested or high-latency
+        paths have longer transfer times and therefore lower throughput, which
+        is correctly reflected as unfairness in the index.
+
+        Per-link JFI is still byte-based (bytes each flow sends over a shared
+        link), which measures how evenly flows are spread across a link.
+
+        Only flows that both sent bytes and completed (have a recorded end
+        time) are included in the global JFI.
+        """
+        throughput_values = []
+        for flow_name, bytes_sent in self.flow_bytes_sent.items():
+            if bytes_sent <= 0:
+                continue
+            start = self.flow_start_time.get(flow_name)
+            end = self.flow_end_time.get(flow_name)
+            if start is None or end is None:
+                continue
+            transfer_time = end - start
+            if transfer_time > 0:
+                throughput_values.append(bytes_sent / transfer_time)
+
+        global_jfi = self._jains_fairness_index(throughput_values)
 
         per_link = {}
         for link_key, flow_dict in self.link_flow_bytes.items():
