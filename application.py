@@ -49,9 +49,14 @@ class Application:
         self.env.process(self._periodic_maintenance())
 
         # Send data
-        data_to_send_bytes = self.flow_config['data_size_kb'] * 1024
-        packet_size = 1500 # bytes
-        num_packets = data_to_send_bytes // packet_size
+        # num_packets in flow_config takes precedence (set from experiment config_parameters),
+        # otherwise derive from data_size_kb.
+        if 'num_packets' in self.flow_config:
+            num_packets = self.flow_config['num_packets']
+        else:
+            data_to_send_bytes = self.flow_config['data_size_kb'] * 1024
+            packet_size = 1500  # bytes
+            num_packets = data_to_send_bytes // packet_size
 
         for i in range(num_packets):
             # Check if path is down and attempt re-selection
