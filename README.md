@@ -8,6 +8,7 @@ A discrete event simulation framework for evaluating SCION path selection algori
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Running Batch Experiments](#running-batch-experiments)
 - [How It Works](#how-it-works)
 - [Configuration](#configuration)
 - [Implementing Custom Algorithms](#implementing-custom-algorithms)
@@ -118,6 +119,179 @@ Packet Loss Rate: 0.00%
 Average Packet Latency: 30.12ms
 ```
 
+## Running Batch Experiments
+
+The `run_experiments.py` script enables running multiple simulations across different algorithms, scenarios, and parameter settings, with automatic result aggregation and plotting.
+
+### Quick Examples
+
+#### Run preset experiments (recommended)
+
+```bash
+# Packet count comparison: 1k, 10k, 100k packets
+python run_experiments.py --preset number_of_packets --workers 8
+
+# SAPEX lambda_div parameter sweep
+python run_experiments.py --preset sapex_lambda_div --workers 8
+
+# SAPEX t_round parameter sweep
+python run_experiments.py --preset sapex_t_round --workers 8
+
+# Quick smoke test (1 run only)
+python run_experiments.py --preset quick --workers 1
+```
+
+#### Preview experiments without running
+
+```bash
+python run_experiments.py --preset number_of_packets --dry-run
+```
+
+#### Custom experiment selection
+
+```bash
+python run_experiments.py \
+    --algorithms sapex lowest_latency round_robin \
+    --scenarios thundering_herd shared_bottleneck \
+    --num-packets 1000 10000 100000 \
+    --workers 8
+```
+
+### Available Presets
+
+| Preset | Algorithms | Scenarios | Packets | Runs | Description |
+|--------|-----------|-----------|---------|------|-------------|
+| `quick` | sapex | thundering_herd | 1k | 1 | Smoke test (fastest) |
+| `number_of_packets` | all 5 | all 3 | 1k, 10k, 100k | 45 | Compare packet count impact |
+| `sapex_lambda_div` | all 5 | all 3 | 2k | 24 | SAPEX diversity parameter sweep |
+| `sapex_t_round` | all 5 | all 3 | 2k | 21 | SAPEX time-round parameter sweep |
+| `full_sweep` | all 5 | all 3 | all 5 | 6480 | Full parameter sweep (⚠️ very long) |
+
+View all options:
+```bash
+python run_experiments.py --list
+```
+
+### Result Folder Naming
+
+Results are organized with automatic naming based on experiment settings:
+
+```
+results/
+├── 20260416_104800_quick/           # Preset name appended
+│   ├── experiment_summary.json
+│   ├── all_results.csv              # Aggregated results
+│   ├── thundering_herd/
+│   │   └── sapex/
+│   │       └── stats.csv
+│   └── ...
+│
+├── 20260416_105200_number_of_packets/
+│   ├── experiment_summary.json
+│   ├── all_results.csv
+│   └── ...
+│
+└── 20260416_105500_custom/          # Non-preset runs tagged "custom"
+    └── ...
+```
+
+Naming format: `<timestamp>_<setting>` where:
+- `timestamp`: Run creation time (YYYYMMdd_HHMMSS)
+- `setting`: Preset name or "custom"
+
+### Automatic Plot Generation
+
+Results are automatically plotted once experiments complete.
+
+**Plots directory structure:**
+```
+plots/
+├── 20260416_104800_quick_num_packets_sweep/
+│   ├── latency_avg_ms.png
+│   ├── packet_loss_rate_percent.png
+│   └── ...
+│
+├── 20260416_105200_number_of_packets_lambda_div_sweep/
+│   ├── latency_avg_ms_lambda_div_comparison.png
+│   ├── packet_loss_rate_percent_lambda_div_comparison.png
+│   └── ...
+```
+
+**Plot naming:**
+- Basic comparison: `<metric>.png`
+- Parameter sweep: `<metric>_<parameter>_comparison.png`
+- Suffix indicates sweep type: `_num_packets_sweep`, `_lambda_div_sweep`, `_t_round_sweep`
+
+#### Skip automatic plotting
+
+For headless/batch runs:
+```bash
+python run_experiments.py --preset number_of_packets --workers 8 --no-plot
+```
+
+Generate plots later manually:
+```bash
+python plot_results.py --input results/20260416_104800_number_of_packets/all_results.csv --out-dir plots
+```
+
+### Output Control
+
+```bash
+# Redirect results to custom directory
+python run_experiments.py --preset number_of_packets --output-dir /path/to/results --workers 8
+
+# Save plots to custom directory
+python run_experiments.py --preset number_of_packets --plots-dir /path/to/plots --workers 8
+
+# Suppress verbose output
+python run_experiments.py --preset quick --quiet --workers 1
+
+# Increase per-experiment timeout (default: 600 seconds)
+python run_experiments.py --preset number_of_packets --timeout-sec 1200 --workers 8
+```
+
+### Experiment Summary
+
+After completion, review `experiment_summary.json`:
+
+```json
+{
+  "timestamp": "20260416_104800",
+  "run_id": "20260416_104800_number_of_packets",
+  "setting": "number_of_packets",
+  "total_experiments": 45,
+  "successful": 45,
+  "failed": 0,
+  "timeout": 0,
+  "errors": 0,
+  "experiments": [
+    {
+      "experiment": "sapex__thundering_herd__sciera_large__np1000_tr2000_cd5000_ld0.5_b100",
+      "status": "success",
+      "returncode": 0
+    },
+    ...
+  ]
+}
+```
+
+### Performance Tips
+
+- **Parallel workers**: Use `--workers N` where N = your CPU cores
+- **Timeout settings**: Increase for large packet counts (1M packets may need 1200s)
+- **Disk space**: Each experiment generates ~1-5MB of results
+- **Memory**: Large topologies + many workers = more memory usage
+
+Example for large experiments:
+```bash
+python run_experiments.py --preset number_of_packets \
+    --workers 8 \
+    --timeout-sec 1200 \
+    --output-dir /mnt/results
+```
+
+
+
 ## How It Works
 
 ### 1. SCION Beaconing Protocol
@@ -215,6 +389,24 @@ yield self.env.timeout(transmission_delay)  # Transmission delay
 ```
 
 ## Configuration
+
+### Experiment Presets
+
+`run_experiments.py` now includes a packet-count comparison preset:
+
+```bash
+```
+
+Preset details:
+- Preset name: `number_of_packets`
+- Algorithms: all comparison algorithms
+- Topology: `sciera_large`
+- Scenarios: all built-in stress scenarios
+- Packets: `1000`, `10000`, `100000`
+- `t_round_ms`: `2000`
+- `cooldown_ms`: `5000`
+- `lambda_div`: `0.5`
+- `point_budget`: `100`
 
 ### Topology Configuration (topology.json)
 

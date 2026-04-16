@@ -86,6 +86,14 @@ class ResultLogger:
         global_stats = report["global"]
         params = config.get("parameters", {})
         
+        fairness = report.get("fairness", {})
+        per_link = fairness.get("per_link", {}) if isinstance(fairness, dict) else {}
+        per_link_jfi_values = [
+            link_stats.get("jains_fairness_index")
+            for link_stats in per_link.values()
+            if isinstance(link_stats, dict) and link_stats.get("jains_fairness_index") is not None
+        ]
+
         row = {
             "experiment_name": config.get("experiment_name", ""),
             "algorithm": config.get("algorithm", ""),
@@ -112,7 +120,7 @@ class ResultLogger:
             "latency_max_ms": global_stats.get("latency_max_ms", 0),
             "total_path_switches": global_stats.get("total_path_switches", 0),
             "wall_clock_seconds": global_stats.get("wall_clock_seconds", ""),
-            "global_jfi": report.get("fairness", {}).get("global_jfi", ""),
+            "global_jfi": fairness.get("global_jfi", ""),
         }
 
         with open(filepath, 'w', newline='') as f:

@@ -1,2 +1,4 @@
 simpy
 networkx
+pandas
+matplotlib
