@@ -17,11 +17,13 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import itertools
 import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -139,18 +141,22 @@ EXPERIMENT_SETS = {
 # ============================================================================
 
 class ExperimentRunner:
-    def __init__(self, output_base_dir="results", dry_run=False, verbose=True, timeout_sec=600):
+    def __init__(self, output_base_dir="results", dry_run=False, verbose=True, timeout_sec=600, max_workers=1):
         self.output_base_dir = Path(output_base_dir)
         self.dry_run = dry_run
         self.verbose = verbose
         self.timeout_sec = timeout_sec
+        self.max_workers = max_workers
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_results = []
+        self._results_lock = threading.Lock()
+        self._log_lock = threading.Lock()
         self.logger = ResultLogger(base_dir=str(self.output_base_dir))
 
     def log(self, msg):
         if self.verbose:
-            print(msg)
+            with self._log_lock:
+                print(msg)
 
     def generate_experiment_configs(
         self,
@@ -286,7 +292,7 @@ class ExperimentRunner:
             return {"experiment": name, "status": "error", "error": str(e)}
 
     def run_experiments(self, configs):
-        """Run all experiment configs."""
+        """Run all experiment configs, in parallel when max_workers > 1."""
         total = len(configs)
 
         self.log(f"\n{'='*70}")
@@ -294,12 +300,19 @@ class ExperimentRunner:
         self.log(f"  Timestamp:    {self.timestamp}")
         self.log(f"  Output:       {self.output_base_dir / self.timestamp}")
         self.log(f"  Total runs:   {total}")
+        self.log(f"  Workers:      {self.max_workers}")
         self.log(f"  Dry run:      {self.dry_run}")
         self.log(f"{'='*70}")
 
-        for i, config in enumerate(configs, 1):
+        def run_and_collect(args):
+            i, config = args
             result = self.run_single(config, i, total)
-            self.run_results.append(result)
+            with self._results_lock:
+                self.run_results.append(result)
+            return result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            list(executor.map(run_and_collect, enumerate(configs, 1)))
 
         self.save_summary()
         self.aggregate_all_stats()
@@ -543,6 +556,8 @@ Examples:
                         help="Suppress verbose output")
     parser.add_argument("--timeout-sec", type=int, default=600,
                         help="Per-experiment timeout in seconds (default: 600)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel experiment workers (default: 1)")
 
     args = parser.parse_args()
 
@@ -591,6 +606,7 @@ Examples:
         dry_run=args.dry_run,
         verbose=not args.quiet,
         timeout_sec=args.timeout_sec,
+        max_workers=args.workers,
     )
 
     configs = runner.generate_experiment_configs(

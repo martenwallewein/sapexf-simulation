@@ -221,26 +221,49 @@ class Simulation:
                 self.env.process(self.path_selection_algorithm.probe_paths())
                 print(f"\nPath probing enabled with {interval}ms interval")
 
+        # Apply num_packets from experiment config_parameters to each flow, and extend
+        # duration_ms so the simulation runs long enough for all packets to be sent.
+        # (Each flow sends 1 packet per ms, so a flow starting at start_time_ms needs
+        # start_time_ms + num_packets ms of simulation time.)
+        config_params = getattr(self, 'config_parameters', {})
+        override_num_packets = config_params.get('num_packets')
+        if override_num_packets is not None:
+            max_start_ms = max(
+                f.get('start_time_ms', 0) for f in self.traffic_scenario['flows']
+            )
+            required_duration_ms = max_start_ms + override_num_packets + 1000  # 1 s buffer
+            if required_duration_ms > self.traffic_scenario.get('duration_ms', 0):
+                print(
+                    f"Extending simulation duration to {required_duration_ms}ms "
+                    f"to accommodate {override_num_packets} packets per flow."
+                )
+                self.traffic_scenario['duration_ms'] = required_duration_ms
+
         print("\nStarting applications based on traffic scenario...")
         for flow in self.traffic_scenario['flows']:
-            source_host = self.topology.get_host(flow['source'])
-            destination_host = self.topology.get_host(flow['destination'])
+            # Build a per-flow config, injecting num_packets if provided.
+            flow_config = dict(flow)
+            if override_num_packets is not None:
+                flow_config['num_packets'] = override_num_packets
+
+            source_host = self.topology.get_host(flow_config['source'])
+            destination_host = self.topology.get_host(flow_config['destination'])
 
             if source_host and destination_host:
                 app = Application(
                     self.env,
-                    f"App-{flow['name']}",
+                    f"App-{flow_config['name']}",
                     source_host,
                     destination_host,
                     self.path_selection_algorithm,
-                    flow,
+                    flow_config,
                     self.results,
                     self.app_registry,
                     metrics_collector=self.metrics_collector
                 )
                 self.env.process(app.run())
             else:
-                print(f"Warning: Could not find source or destination host for flow {flow['name']}")
+                print(f"Warning: Could not find source or destination host for flow {flow_config['name']}")
 
         # Schedule event manager process
         self.env.process(self.event_manager.schedule_events())
