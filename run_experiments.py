@@ -345,6 +345,12 @@ class ExperimentRunner:
         self.aggregate_all_stats()
         self.print_summary()
 
+    def run_experiments_with_plots(self, configs, plots_dir="plots", skip_plots=False):
+        """Run all experiments and automatically generate plots afterward."""
+        self.run_experiments(configs)
+        if not skip_plots:
+            self.plot_results(plots_dir)
+
     def save_summary(self):
         """Save experiment run summary."""
         if self.dry_run:
@@ -386,6 +392,42 @@ class ExperimentRunner:
             aggregate_path = str(run_root / "all_results.csv")
             ResultLogger.aggregate_stats_csvs(all_run_dirs, aggregate_path)
             self.log(f"\n  Aggregated CSV: {aggregate_path}")
+
+    def plot_results(self, plots_dir="plots"):
+        """Automatically generate plots from aggregated results."""
+        if self.dry_run:
+            return
+
+        run_root = self.output_base_dir / self.run_id
+        all_results_csv = run_root / "all_results.csv"
+
+        if not all_results_csv.exists():
+            self.log(f"  [SKIP PLOTS] No all_results.csv found at {all_results_csv}")
+            return
+
+        cmd = [
+            sys.executable, "plot_results.py",
+            "--input", str(all_results_csv),
+            "--out-dir", plots_dir,
+        ]
+
+        try:
+            self.log(f"\n  [PLOTS] Starting plot generation...")
+            result = subprocess.run(
+                cmd,
+                text=True,
+                cwd=str(Path(__file__).parent),
+                capture_output=False,
+                timeout=300,  # 5 minute timeout for plotting
+            )
+            if result.returncode == 0:
+                self.log(f"  [PLOTS] Completed successfully")
+            else:
+                self.log(f"  [PLOTS] Failed (exit {result.returncode})")
+        except subprocess.TimeoutExpired:
+            self.log(f"  [PLOTS] Timeout (>300s)")
+        except Exception as e:
+            self.log(f"  [PLOTS] Error: {e}")
 
     def print_summary(self):
         """Print final summary."""
@@ -470,6 +512,12 @@ def list_options():
         )
         n_combos = baseline_combos + varying_combos
         print(f"    - {name} ({n_combos} runs): {cfg['description']}")
+
+    print("\n  OUTPUT & PLOTTING OPTIONS:")
+    print("    --output-dir <path>     Base directory for results (default: results)")
+    print("    --plots-dir <path>      Directory for generated plots (default: plots)")
+    print("    --no-plot               Skip automatic plot generation after experiments")
+    print("                            (useful for headless/batch runs)")
 
     print()
 
@@ -614,6 +662,10 @@ Examples:
                         help="Per-experiment timeout in seconds (default: 600)")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of parallel experiment workers (default: 1)")
+    parser.add_argument("--no-plot", action="store_true",
+                        help="Skip automatic plot generation after experiments")
+    parser.add_argument("--plots-dir", type=str, default="plots",
+                        help="Directory for generated plots (default: plots)")
 
     args = parser.parse_args()
 
@@ -684,7 +736,11 @@ Examples:
         print("No experiment configurations generated. Check your arguments.")
         return 1
 
-    runner.run_experiments(configs)
+    runner.run_experiments_with_plots(
+        configs,
+        plots_dir=args.plots_dir,
+        skip_plots=args.no_plot,
+    )
     return 0
 
 
