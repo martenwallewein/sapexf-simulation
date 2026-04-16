@@ -22,10 +22,12 @@ DEFAULT_METRICS = [
     "total_packets_received",
     "total_path_switches",
     "global_jfi",
+    "per_link_fairness_jfi",
 ]
 
 FAIRNESS_METRICS = {
     "global_jfi",
+    "per_link_fairness_jfi",
 }
 
 
@@ -48,6 +50,11 @@ def has_num_packets_column(df: pd.DataFrame) -> bool:
     if "num_packets" not in df.columns:
         return False
     return df["num_packets"].nunique() > 1
+
+
+def is_fairness_data(df: pd.DataFrame) -> bool:
+    """Check if the dataframe is per-link fairness data (from all_fairness_results.csv)."""
+    return "link" in df.columns and "jains_fairness_index" in df.columns
 
 
 def find_latest_all_results(results_dir: Path) -> Path:
@@ -123,6 +130,43 @@ def plot_metric(df: pd.DataFrame, metric: str, output_dir: Path) -> Path:
     output_file = output_dir / f"{metric}.png"
     fig.savefig(output_file, dpi=150)
     plt.close(fig)
+    return output_file
+
+
+def plot_per_link_fairness(df: pd.DataFrame, output_dir: Path) -> Path:
+    """
+    Plot per-link fairness index (average across all links per scenario/algorithm).
+    Aggregates all per-link JFI values into a single metric per algorithm per scenario.
+    """
+    metric_df = df.copy()
+    metric_df["jains_fairness_index"] = pd.to_numeric(
+        metric_df["jains_fairness_index"], errors="coerce"
+    )
+    
+    # Aggregate: average JFI across all links for each scenario/algorithm combination
+    grouped = (
+        metric_df.groupby(["scenario", "algorithm"], as_index=False)["jains_fairness_index"]
+        .mean()
+    )
+    
+    pivot = grouped.pivot(index="scenario", columns="algorithm", values="jains_fairness_index")
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    pivot.plot(kind="bar", ax=ax)
+    
+    ax.set_title("Per-Link Fairness (Average Jain's Index)")
+    ax.set_xlabel("Scenario")
+    ax.set_ylabel("Average JFI Across All Links")
+    ax.set_ylim(0, 1.05)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(title="Algorithm", bbox_to_anchor=(1.02, 1), loc="upper left")
+    
+    plt.tight_layout()
+    
+    output_file = output_dir / "per_link_fairness.png"
+    fig.savefig(output_file, dpi=150)
+    plt.close(fig)
+    return output_file
     return output_file
 
 
@@ -379,6 +423,28 @@ def main() -> int:
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 
     df = pd.read_csv(input_csv)
+    
+    # Check if this is fairness data (all_fairness_results.csv)
+    if is_fairness_data(df):
+        print(f"Detected per-link fairness data from: {input_csv}")
+        out_dir = args.out_dir / (input_csv.parent.name + "_fairness_plots")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        if args.scenario:
+            df = df[df["scenario"] == args.scenario]
+        if args.algorithm:
+            df = df[df["algorithm"] == args.algorithm]
+        
+        if df.empty:
+            raise ValueError("No rows left after applying filters.")
+        
+        print(f"Writing plots to: {out_dir}")
+        output_file = plot_per_link_fairness(df, out_dir)
+        print(f"Saved: {output_file}")
+        
+        return 0
+    
+    # Standard metrics plotting
     metrics_to_plot = validate_columns(df, args.metrics)
 
     if args.scenario:

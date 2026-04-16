@@ -282,6 +282,26 @@ class MetricsCollector:
 
         return {"global_jfi": round(global_jfi, 6), "per_link": per_link}
     
+    def get_average_per_link_jfi(self):
+        """
+        Get the average Jain's Fairness Index across all links.
+        Useful as a single metric for comparison in aggregated results.
+        """
+        per_link = self.get_fairness_stats().get("per_link", {})
+        if not per_link:
+            return 0.0
+        
+        jfi_values = [
+            link_stats.get("jains_fairness_index")
+            for link_stats in per_link.values()
+            if isinstance(link_stats, dict) and link_stats.get("jains_fairness_index") is not None
+        ]
+        
+        if not jfi_values:
+            return 0.0
+        
+        return round(sum(jfi_values) / len(jfi_values), 6)
+    
     def get_per_path_stats(self):
         """Get utilization stats per path."""
         path_stats = {}

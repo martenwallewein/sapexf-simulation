@@ -48,7 +48,7 @@ class ResultLogger:
         
         report = metrics_collector.get_full_report()
         self.save_stats_json(run_dir, report, config)
-        self.save_stats_csv(run_dir, report, config)
+        self.save_stats_csv(run_dir, report, config, metrics_collector)
         self.save_per_flow_csv(run_dir, report)
         self.save_per_path_csv(run_dir, report)
         self.save_raw_latencies_csv(run_dir, metrics_collector)
@@ -75,7 +75,7 @@ class ResultLogger:
         with open(filepath, 'w') as f:
             json.dump(output, f, indent=2)
 
-    def save_stats_csv(self, run_dir, report, config):
+    def save_stats_csv(self, run_dir, report, config, metrics_collector=None):
         """
         Save a single summary row to stats.csv.
         This CSV is designed to be appended/concatenated across runs
@@ -87,12 +87,11 @@ class ResultLogger:
         params = config.get("parameters", {})
         
         fairness = report.get("fairness", {})
-        per_link = fairness.get("per_link", {}) if isinstance(fairness, dict) else {}
-        per_link_jfi_values = [
-            link_stats.get("jains_fairness_index")
-            for link_stats in per_link.values()
-            if isinstance(link_stats, dict) and link_stats.get("jains_fairness_index") is not None
-        ]
+        
+        # Compute average per-link JFI
+        avg_per_link_jfi = "" 
+        if metrics_collector is not None:
+            avg_per_link_jfi = metrics_collector.get_average_per_link_jfi()
 
         row = {
             "experiment_name": config.get("experiment_name", ""),
@@ -121,6 +120,7 @@ class ResultLogger:
             "total_path_switches": global_stats.get("total_path_switches", 0),
             "wall_clock_seconds": global_stats.get("wall_clock_seconds", ""),
             "global_jfi": fairness.get("global_jfi", ""),
+            "per_link_fairness_jfi": avg_per_link_jfi,
         }
 
         with open(filepath, 'w', newline='') as f:
@@ -244,5 +244,51 @@ class ResultLogger:
 
         with open(output_filepath, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_rows)
+
+    @staticmethod
+    def aggregate_fairness_csvs(results_dirs, output_filepath):
+        """
+        Aggregate fairness_summary.csv from multiple run directories into a single CSV.
+        Each row includes the run's experiment/algorithm/scenario metadata plus per-link metrics.
+        
+        Args:
+            results_dirs: List of run directories containing fairness_summary.csv
+            output_filepath: Path for the aggregated output CSV
+        """
+        all_rows = []
+        
+        for run_dir in results_dirs:
+            fairness_path = os.path.join(run_dir, "fairness_summary.csv")
+            stats_path = os.path.join(run_dir, "stats.csv")
+            
+            if not os.path.exists(fairness_path):
+                continue
+            
+            # Read metadata from stats.csv for this run
+            metadata = {}
+            if os.path.exists(stats_path):
+                with open(stats_path, 'r', newline='') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        metadata = row
+                        break
+            
+            # Read fairness data and add metadata
+            with open(fairness_path, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    combined_row = {**metadata, **row}
+                    all_rows.append(combined_row)
+        
+        if not all_rows:
+            return
+        
+        # Get all unique field names
+        fieldnames = list(dict.fromkeys(key for row in all_rows for key in row.keys()))
+        
+        with open(output_filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval='')
             writer.writeheader()
             writer.writerows(all_rows)

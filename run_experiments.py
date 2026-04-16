@@ -376,7 +376,7 @@ class ExperimentRunner:
             json.dump(summary, f, indent=2)
 
     def aggregate_all_stats(self):
-        """Aggregate all stats.csv files into one master CSV."""
+        """Aggregate all stats.csv and fairness_summary.csv files into master CSVs."""
         if self.dry_run:
             return
 
@@ -389,9 +389,16 @@ class ExperimentRunner:
                 all_run_dirs.append(dirpath)
 
         if all_run_dirs:
+            # Aggregate main stats
             aggregate_path = str(run_root / "all_results.csv")
             ResultLogger.aggregate_stats_csvs(all_run_dirs, aggregate_path)
             self.log(f"\n  Aggregated CSV: {aggregate_path}")
+            
+            # Aggregate fairness data
+            fairness_aggregate_path = str(run_root / "all_fairness_results.csv")
+            ResultLogger.aggregate_fairness_csvs(all_run_dirs, fairness_aggregate_path)
+            if Path(fairness_aggregate_path).exists():
+                self.log(f"  Aggregated Fairness CSV: {fairness_aggregate_path}")
 
     def plot_results(self, plots_dir="plots"):
         """Automatically generate plots from aggregated results."""
@@ -405,6 +412,7 @@ class ExperimentRunner:
             self.log(f"  [SKIP PLOTS] No all_results.csv found at {all_results_csv}")
             return
 
+        # Plot main metrics
         cmd = [
             sys.executable, "plot_results.py",
             "--input", str(all_results_csv),
@@ -428,6 +436,32 @@ class ExperimentRunner:
             self.log(f"  [PLOTS] Timeout (>300s)")
         except Exception as e:
             self.log(f"  [PLOTS] Error: {e}")
+        
+        # Plot per-link fairness if available
+        fairness_csv = run_root / "all_fairness_results.csv"
+        if fairness_csv.exists():
+            cmd_fairness = [
+                sys.executable, "plot_results.py",
+                "--input", str(fairness_csv),
+                "--out-dir", plots_dir,
+            ]
+            try:
+                self.log(f"  [PLOTS] Generating fairness plots...")
+                result = subprocess.run(
+                    cmd_fairness,
+                    text=True,
+                    cwd=str(Path(__file__).parent),
+                    capture_output=False,
+                    timeout=300,
+                )
+                if result.returncode == 0:
+                    self.log(f"  [PLOTS] Fairness plots completed successfully")
+                else:
+                    self.log(f"  [PLOTS] Fairness plots failed (exit {result.returncode})")
+            except subprocess.TimeoutExpired:
+                self.log(f"  [PLOTS] Fairness plots timeout (>300s)")
+            except Exception as e:
+                self.log(f"  [PLOTS] Fairness plots error: {e}")
 
     def print_summary(self):
         """Print final summary."""
