@@ -280,11 +280,8 @@ class MetricsCollector:
                 "flow_bytes": active_flows,
             }
 
-        return {
-            "global_jfi": round(global_jfi, 6),
-            "per_link": per_link,
-        }
-
+        return {"global_jfi": round(global_jfi, 6), "per_link": per_link}
+    
     def get_per_path_stats(self):
         """Get utilization stats per path."""
         path_stats = {}

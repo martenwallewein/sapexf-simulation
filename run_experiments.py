@@ -145,13 +145,23 @@ EXPERIMENT_SETS = {
 # ============================================================================
 
 class ExperimentRunner:
-    def __init__(self, output_base_dir="results", dry_run=False, verbose=True, timeout_sec=600, max_workers=1):
+    def __init__(
+        self,
+        output_base_dir="results",
+        dry_run=False,
+        verbose=True,
+        timeout_sec=600,
+        max_workers=1,
+        run_label=None,
+    ):
         self.output_base_dir = Path(output_base_dir)
         self.dry_run = dry_run
         self.verbose = verbose
         self.timeout_sec = timeout_sec
         self.max_workers = max_workers
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_label = _safe_label(run_label) if run_label else None
+        self.run_id = f"{self.timestamp}_{self.run_label}" if self.run_label else self.timestamp
         self.run_results = []
         self._results_lock = threading.Lock()
         self._log_lock = threading.Lock()
@@ -228,7 +238,7 @@ class ExperimentRunner:
                             "algorithm": algo,
                             "scenario": scenario_name,
                             "output_dir": str(
-                                self.output_base_dir / self.timestamp / scenario_name / algo
+                                self.output_base_dir / self.run_id / scenario_name / algo
                             ),
                             "experiment_name": exp_name,
                             "parameters": {
@@ -313,7 +323,9 @@ class ExperimentRunner:
         self.log(f"\n{'='*70}")
         self.log(f"  SAPEX-F Experiment Runner")
         self.log(f"  Timestamp:    {self.timestamp}")
-        self.log(f"  Output:       {self.output_base_dir / self.timestamp}")
+        if self.run_label:
+            self.log(f"  Setting:      {self.run_label}")
+        self.log(f"  Output:       {self.output_base_dir / self.run_id}")
         self.log(f"  Total runs:   {total}")
         self.log(f"  Workers:      {self.max_workers}")
         self.log(f"  Dry run:      {self.dry_run}")
@@ -338,12 +350,14 @@ class ExperimentRunner:
         if self.dry_run:
             return
 
-        summary_dir = self.output_base_dir / self.timestamp
+        summary_dir = self.output_base_dir / self.run_id
         summary_dir.mkdir(parents=True, exist_ok=True)
         summary_path = summary_dir / "experiment_summary.json"
 
         summary = {
             "timestamp": self.timestamp,
+            "run_id": self.run_id,
+            "setting": self.run_label,
             "total_experiments": len(self.run_results),
             "successful": sum(1 for r in self.run_results if r["status"] == "success"),
             "failed": sum(1 for r in self.run_results if r["status"] == "failed"),
@@ -360,7 +374,7 @@ class ExperimentRunner:
         if self.dry_run:
             return
 
-        run_root = self.output_base_dir / self.timestamp
+        run_root = self.output_base_dir / self.run_id
         all_run_dirs = []
 
         # Walk through all result directories looking for stats.csv
@@ -534,6 +548,13 @@ def _apply_scenario_file_defaults(
     return algorithms, topologies, num_packets, t_round, cooldown, lambda_div, budget
 
 
+def _build_run_label(args) -> str:
+    """Build a short setting label used in top-level result folder names."""
+    if args.preset:
+        return args.preset
+    return "custom"
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -642,6 +663,7 @@ Examples:
         verbose=not args.quiet,
         timeout_sec=args.timeout_sec,
         max_workers=args.workers,
+        run_label=_build_run_label(args),
     )
 
     configs = runner.generate_experiment_configs(

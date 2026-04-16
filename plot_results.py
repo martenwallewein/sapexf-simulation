@@ -389,17 +389,27 @@ def main() -> int:
     if df.empty:
         raise ValueError("No rows left after applying filters.")
 
-    out_dir = args.out_dir / input_csv.parent.name
+    # Detect parameter-sweep style datasets and choose specialized plot layout.
+    is_lambda_div_comparison = has_lambda_div_column(df)
+    is_t_round_comparison = has_t_round_column(df)
+    is_num_packets_comparison = has_num_packets_column(df)
+    
+    # Build descriptive suffix for output directory based on detected comparisons
+    settings_suffix = ""
+    if is_lambda_div_comparison:
+        settings_suffix = "_lambda_div_sweep"
+    elif is_t_round_comparison:
+        settings_suffix = "_t_round_sweep"
+    elif is_num_packets_comparison:
+        settings_suffix = "_num_packets_sweep"
+    
+    out_dir = args.out_dir / (input_csv.parent.name + settings_suffix)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using input: {input_csv}")
     print(f"Writing plots to: {out_dir}")
 
     # Detect parameter-sweep style datasets and choose specialized plot layout.
-    is_lambda_div_comparison = has_lambda_div_column(df)
-    is_t_round_comparison = has_t_round_column(df)
-    is_num_packets_comparison = has_num_packets_column(df)
-    
     if is_lambda_div_comparison:
         print("Detected lambda_div variations - generating lambda_div comparison plots")
         for metric in metrics_to_plot:
